@@ -1,0 +1,152 @@
+\documentclass[a4paper, 10pt]{article}
+\hyphenpenalty=8000
+\textwidth=125mm
+\textheight=185mm
+
+\usepackage{graphicx}
+%this package is flexible for image insertion
+%
+\usepackage{alltt}
+%this package is suitable for the description of algorithms and computer programs
+%
+\usepackage{amsmath}
+%this package draws mathematical symbols smoothly
+%
+\usepackage[hidelinks, pdftex]{hyperref}
+%this package produces hypertext links in the document
+
+\pagenumbering{arabic}
+\setcounter{page}{1}
+\renewcommand{\thefootnote}{\fnsymbol{footnote}}
+\newcommand{\doi}[1]{\href{https://doi.org/#1}{\texttt{https://doi.org/#1}}}
+
+\begin{document}
+
+\begin{center}
+Nonlinear Analysis: Modelling and Control, Vol. vv, No. nn, YYYY\\
+\copyright\ Deakin University\\[24pt]
+\LARGE
+\textbf{Title of your article}\footnote{This research was supported by grant No.\ xxxx.}\\[6pt]
+\small
+\textbf {Firstname Lastname, Firstname2 Lastname2, Firstname3 Lastname3}\\[6pt]
+Institution(s) of author(s), address(es) \\ author@somewhere.host\\[6pt]
+Received: date\quad/\quad
+Revised: date\quad/\quad
+Publised online: data
+\end{center}
+
+\begin{abstract}
+A short abstract describing the research done, methodology, and achieved results is to be presented. The abstract should contain approximately 100 words. The volume of the article is up to 20 pages in NA journal style. The journal recognizes review articles as special ones. These articles (if any) will occupy the starting positions in the journal and may contain more than 20 pages. Text in article have to follow a few simple guidelines: complex mathematical expressions have to be justified (like in the excerpt below), algorithms have to be presented in the style of \texttt{alltt}, \textit{postscript specials} have to be absent in file format presenting images. The enumeration of references within any article has to be organized in alphabetic order (see the sample below). References have to be distinguished between journal articles, collective works, and books and presented in BibTeX\ \texttt{NAplain} style (see the corresponding section below and the file \texttt{sample.bib}). \vskip 2mm
+
+\textbf{Keywords:} a few keywords (2--5) essential to the content of the article.
+
+\end{abstract}
+
+\nocite{2009ProcDETAp}
+
+\section{Introduction or the first section}\label{s:1}
+This is a sample demonstration of the requirements for articles submitted to the journal ``Nonlinear Analysis:\ Modelling and Control''. For visuality, we quote random portions of published articles.
+
+\section{Examples of equations, algorithms, figures}\label{s:2}
+Let us consider one-way coupled chaotic systems of the following general form (master-slave configurations or systems with a skew product structure):
+%
+\begin{equation}\label{eq:1}
+   \dot{X}=F(X),\qquad \dot{Y}=G(Y,X).
+\end{equation}
+%
+Here $X\equiv\{x_1,x_2,\ldots,x_d\}$ is a $d$-dimensional state vector of the driving system, and $Y\equiv\{y_1,y_2,\ldots,y_r\}$ is an $r$-dimensional state vector of the response system. $F$ and $G$ define the vector fields of the driving and response systems.
+
+\subsection{Complex mathematical expressions}\label{s:2.1}
+%
+\begin{align}
+ 1
+&\le\big|P(1)\big|=|a_d|\prod_{j=k+1}^d\alpha_j\prod_{j=k+1}^d\big(\alpha_j^{-1}-1\big)\prod_{j=1}^d(\alpha_j-1)\notag\\
+&\le\frac{|a_da_0|}{M(P)}\bigg(\bigg(\frac{M(P)}{|a_0|}\bigg)^{1/(d-k)}-1\bigg)^{d-k}\bigg(\bigg(\frac{M(P)}{|a_d|}\bigg)^{1/k}-1\bigg)^k\notag\\
+&= M(P)^{-1}\big(M(P)^{1/(d-k)}-|a_0|^{1/(d-k)}\big)^{d-k}\big(M(P)^{1/k}-|a_d|^{1/k}\big)^k\notag\\
+&\le M(P)^{-1}\big(M(P)^{1/(d-k)}-1\big)^{d-k}\big(M(P)^{1/k}-1\big)^k,\label{eq:2}
+\end{align}
+%
+\begin{equation}\label{eq:3}
+\begin{split}
+ \varOmega
+&=\big\{(r,z){:}\ \,0<r<R,\ 0<z<H\big\},\\
+ \varOmega_0
+&=\big\{(r,z){:}\ \,r^2+z^2<R_0^2,\ z>0\big\},\\
+ \varGamma_1
+&=\big\{(r,0){:}\ \,0\le r\le R\big\},\\
+ \varGamma
+&=\big\{(0,z){:}\ \,0<z\le H\big\}\cup\big\{(R,z){:}\ \,0<z\le H\big\}\\
+&\quad\cup\big\{(r,H){:}\ \,0<r<R\big\}\cup\varGamma_1,
+\end{split}
+\end{equation}
+%
+\begin{equation*}
+u_{ij}=u(r_i,z_j,t),\qquad v_{ij}=v(r_i,z_j,t),\qquad d_{\alpha,ij}=d_{\alpha}(r_i,z_j), \\
+\end{equation*}
+%
+$i=0,1,\ldots,N$, $j=0,1,\ldots,M_\alpha$, $\alpha=1,2$.
+
+GS guarantees that the asymptotic dynamics of the response system is independent of its initial conditions and is completely determined by the driving system. Geometrically, this implies a collapse of the overall evolution onto a stable synchronization manifold $M=\{(X,Y){:}\ \,\varPhi(X)=Y\}$ in the full phase space of the two systems $X\oplus Y$. It is easy to show that the linear stability of the identity manifold $Y'=Y$ in the extended phase space $X\oplus Y\oplus Y'$ is equivalent to the linear stability of the manifold $M=\{(X,Y){:}\ \,\varPhi(X)=Y\}$ in the original $X \oplus Y$ phase space.
+
+\subsection{The following excerpt demonstrates presentation of an algorithm}\label{s:2.2}
+%
+{\small
+\begin{alltt}
+Input: A list of segmentation parameters and the
+       corresponding \(C1\), \(C2\) and \(C3\) values.
+
+Output: A selection of the optimum segmentation and its
+       parameters.
+
+ BEGIN
+       Search the input list for local minima in \(C2\),
+       and list the local minima into \(L\);
+
+       Search \(L\) and locate the minimum of \(C1 + 10 C3\sp{2}\),
+       present this element of \(L\) as the result;
+ END
+\end{alltt}}
+
+\subsection{Just another excerpt presenting image}\label{s:2.3}
+
+In the works of S.\ Fu\v{c}\'ik, this spectrum was studied first as an object related to ``slightly'' nonlinear problems.\ The interest in these type of problems grew also in connection with the theory of suspension bridges (see, e.g., \cite{LazerSIAM}).\ From the mathematical point of view, the Fu\v{c}\'ik equation became a source of numerous investigations generalizing and refining the results by Fu\v{c}\'ik.
+
+The Fu\v{c}\'ik equation with Sturm--Liouville conditions has similar structure of spectrum, and the description of it can be found in \cite{dancer} or \cite{Fucik}.
+
+Completely different spectrum was obtained for the problem composed of equation
+%
+\begin{equation} \label{eq:4}
+x''=-\mu x^{+}+\lambda x^{-}
+\end{equation}
+%
+with nonlocal conditions
+%
+\begin{equation} \label{eq:5}
+x(0)=0, \qquad \int\limits_0^1 x(s)\,\mathrm{d}s=0.
+\end{equation}
+%
+
+A recent paper \cite{sergejevaLUMII} deals with the problem composed of equation \eqref{eq:4} with conditions
+%
+\begin{equation} \label{eq:6}
+x'(0)=0, \qquad \int\limits_0^1x(s)\,\mathrm{d}s=0.
+\end{equation}
+
+%
+\paragraph{Author Contributions.} All Authors (FN.LN., FN2.LN2. and FN3.LN3.) have contributed as follows: methodology,
+FN.LN.; formal analysis, FN.LN., and FN2.LN2.; software, FN3.LN3.; validation, FN3.LN3.; writing – original draft preparation, FN.LN., and FN3.LN3.; writing – review and editing, FN.LN., FN2.LN2., and FN3.LN3. All authors have read and approved the published version of the manuscript.
+
+
+% ----------------------------------------------------------------
+
+\paragraph{Conflicts of Interest.} The authors declare no conflicts of interest.
+
+\paragraph{Acknowledgment.}
+% ----------------------------------------------------------------
+We would like to thank dr. N. Sergejeva for the excerpts of article \cite{2014SergejevaN}.
+
+\bibliographystyle{NAplain}
+\bibliography{sample}
+
+
+\end{document}
