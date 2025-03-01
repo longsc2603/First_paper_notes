@@ -45,150 +45,111 @@ s224930257@deakin.edu.au\\[6pt]
 
 
 \section{Problem Statement}\label{s:1}
-In a conventional setting, we have a time-series dataset $\{ \mathbf{x}_t \}_{t=1}^T$ 
-describing patient records across \(T\) consecutive time steps (e.g., daily or weekly 
-measurements). However, due to various practical reasons (such as data anonymization, 
-incomplete data logs, etc.), the temporal ordering is lost. Instead of a temporally-labeled sequence
-$\bigl(\mathbf{x}_1, \mathbf{x}_2, \dots, \mathbf{x}_T\bigr),$ we only have a collection of
-\(N\) unlabeled points $\{\mathbf{x}_1, \mathbf{x}_2, \dots, \mathbf{x}_N\} \subset \mathbf{R}^d.$
-Our goal is to recover a plausible temporal sequence from this unordered set.
-
-To do this, we assume that certain constraints exist which a valid time-series ordering should
-hold, such as:
-
-\paragraph{1.1. Trajectory Distance.}\mbox{}\\
-The total distance traversed by the sequence should be ``small", reflecting the fact that
-patient measurements taken throughout a period of time often don't change too significantly.
-Thus, we aim to minimize the sum of distances between consecutive points:
+In a conventional setting, we have a time-series dataset $\{\mathbf{X}^{(m)}\}_{m=1}^M$,
 \[
-  \min_{\pi} \; \sum_{t=1}^{N-1}
-    d\!\Bigl(\mathbf{x}_{\pi(t)}, \mathbf{x}_{\pi(t+1)}\Bigr),
+\mathbf{X}^{(m)} 
+= 
+\bigl[\mathbf{X}_{1}^{(m)}, \mathbf{X}_{2}^{(m)}, \ldots, \mathbf{X}_{T}^{(m)}\bigr],
 \]
-where \(d(\cdot, \cdot)\) is a distance function (e.g., the Euclidean norm \(\|\cdot\|\) in \(\mathbf{R}^d\)).
+where $\mathbf{X}_{i}^{(m)}$ can be vectors ($\mathbf{X}_{i}^{(m)} \in \mathbf{R}^d$) or matrices
+($\mathbf{X}_{i}^{(m)} \in \mathbf{R}^{t \times d}$), depending on the unit of time being considered
+here is a single time step or a period of many steps. Here we consider the latter matrix case.
+Each of these trajectories describe patient records across \(T\) time periods
+(e.g., patient measurements throughout \(T\) hours).
 
-\paragraph{1.2. Consecutive Step.}\mbox{}\\
-Also from the ``patient measurements'' intuition stated previously, any two consecutive
-measurements should not differ by more than a threshold \(\epsilon\):
+However, due to various practical reasons (such as data anonymization, 
+incomplete data logs, etc.), the temporal ordering (i.e. the time dimension) is lost.
+Furthermore, the trajectory data is also missing, with the assumption that for each of
+T time period, there is always at least one trajectory with data present. Thus, instead
+of a temporally-labeled complete dataset $\{\mathbf{X}^{(m)}\}_{m=1}^M$,
+we have a dataset of M temporally-unordered partially-completed trajectories.
+
+We assume that the data is governed by a time-homogeneous linear additive noise stochastic
+differential equation (SDE), which has the form:
 \[
-  d\!\Bigl(\mathbf{x}_{\pi(t)}, \mathbf{x}_{\pi(t+1)}\Bigr) \; \le \; \epsilon
-  \quad \text{for all} \; t \in \{1,\dots,N-1\}.
+\mathrm{d}\mathbf{X}_t 
+= 
+\mathbf{A}\mathbf{X}_t\mathrm{d}t 
+\;+\; 
+\mathbf{G}\mathrm{d}\mathbf{W}_t,
 \]
-This enforces that the reconstructed time series does not have abrupt, large jumps in the data.
+with unknown drift-diffusion parameters $\mathbf{A}$ and $\mathbf{G}$. The aim is to:
+\begin{enumerate}
+\item Reconstruct missing segments into full (or partially completed) trajectories
+$\{\widetilde{\mathbf{X}}^{(m)}\}$. This aim is intermediate.
+\item Estimate $\mathbf{A}$ and $\mathbf{G}$ by maximum likelihood, while enforcing a Directed
+Acyclic Graph (DAG) constraint on the global ordering of the reconstructed segments
+(thus avoiding ``cyclic'' order). This is our final and most important aim.
+\end{enumerate}
 
-\paragraph{1.3. Directional Consistency.}\mbox{}\\
-Another possible constraint to be used is the assumption that direction of changes should 
-be fairly consistent. Even though the noise terms are independent, the drift terms make the relative
-directional changes between consecutive points not too significant. Thus, we can filter out less likely
-sequences that contain too abrupt changes in direction, such that:
-\[
-  \theta_{\mathbf{x}_t,\mathbf{x}_{t+1}} \ge \theta
-  \quad \text{for all} \; t \in \{1,\dots,N-1\}.
-\]
-where \(\theta_{\mathbf{x}_t,\mathbf{x}_{t+1}}\) is the angle between two consecutive
-vectors \(\mathbf{x}_t\) and \(\mathbf{x}_{t+1}\).
+\section{Proposed Method}\label{s:2}
+We proposed a solution that works as follows:
 
-% Given these constraints, the problem is to discover a permutation \(\pi\) (i.e., a reordering of the dataset) that best satisfies the known properties of the original time series while respecting the total distance and/or step-size limits.
+\paragraph{2.1. Sorting Data by Variance}
+\begin{itemize}
+  \item Empirically evaluate the variance of each observed segment of all
+  our trajectories.
+  \item Sort segments in ascending order of variance, with the assumption that we
+  are dealing with a diverging SDE and that a diverging SDE usually has increasing
+  variance over (hidden) time. This can be done in a similar manner for converging SDEs.
+\end{itemize}
 
-\section{Current Experimental Results and Issues}\label{s:2}
-% Let us consider one-way coupled chaotic systems of the following general form (master-slave configurations or systems with a skew product structure):
-% %
-% \begin{equation}\label{eq:1}
-%    \dot{X}=F(X),\qquad \dot{Y}=G(Y,X).
-% \end{equation}
-% %
-% Here $X\equiv\{x_1,x_2,\ldots,x_d\}$ is a $d$-dimensional state vector of the driving system, and $Y\equiv\{y_1,y_2,\ldots,y_r\}$ is an $r$-dimensional state vector of the response system. $F$ and $G$ define the vector fields of the driving and response systems.
+\paragraph{2.2. Iterative Two-Step Scheme} \mbox{}\\
+First, we randomly initialize the parameters
+$\mathbf{A}^{(0)}$ and $\mathbf{G}^{(0)}$. Then, we follow a two-step
+iterative scheme as follows:
+\begin{enumerate}
+  \item[(a)] \textbf{Update Previously-Sorted Segments} \\
+    Keeping $\mathbf{A}^{(n)}$ and $\mathbf{G}^{(n)}$ at iteration $n$ fixed, rearrange the
+    previously sorted segments for each trajectory to maximize the log-likelihood minus a
+    DAG penalty $\Omega_{\mathrm{DAG}}$:
+    \[
+    \{\widetilde{\mathbf{X}}^{(m)}\}
+    = 
+    \arg\max_{\{\widetilde{\mathbf{X}}^{(m)}\}}
+    \sum_{m=1}^M
+    \ln p\bigl(\widetilde{\mathbf{X}}^{(m)} \mid \mathbf{A}^{(n)}, \mathbf{G}^{(n)}\bigr)
+    \;-\; 
+    \Omega_{\mathrm{DAG}}\bigl(\{\widetilde{\mathbf{X}}^{(m)}\}\bigr).
+    \]
+    A well-known continuous DAG-penalty comes from the NOTEARS approach by
+    Zheng et al., 2018 \cite{zheng2018dagstearscontinuousoptimization}:
+    \[
+    h(\mathbf{A})
+    = \text{trace}(e^{\mathbf{A} \circ \mathbf{A}})-d,
+    \]
+    \[
+    \Omega_{\mathrm{DAG}}\bigl(\{\widetilde{\mathbf{X}}^{(m)}\}\bigr)
+    = \alpha (h(\mathbf{A})),
+    \]
+    where it is proved in the \cite{zheng2018dagstearscontinuousoptimization} that
+    $h(\mathbf{A}) = 0$ if and only if $\mathbf{A}$,
+    our adjacency matrix, corresponds to a DAG (no directed cycles). If cycles exist,
+    $h(\mathbf{A}) > 0$. Hence, adding this term as a penalty encourages $\mathbf{A}$
+    to remain acyclic.
+  \item[(b)] \textbf{Update SDE Parameters} \\
+    With the newly completed trajectories fixed, re-estimate the SDE parameters:
+    \[
+    (\mathbf{A}^{(n+1)}, \mathbf{G}^{(n+1)}) 
+    = 
+    \arg\max_{\mathbf{A}, \mathbf{G}}
+    \sum_{m=1}^M
+    \ln p\bigl(\widetilde{\mathbf{X}}^{(m)} \mid \mathbf{A}^{(n)}, \mathbf{G}^{(n)}\bigr).
+    \]
+    This step can be done using the parameter estimation framework named APPEX introduced
+    by Guan et al., 2024 \cite{guan2024identifyingdriftdiffusioncausal}.
+  \end{enumerate}
 
-% \subsection{Complex mathematical expressions}\label{s:2.1}
-% %
-% \begin{align}
-%  1
-% &\le\big|P(1)\big|=|a_d|\prod_{j=k+1}^d\alpha_j\prod_{j=k+1}^d\big(\alpha_j^{-1}-1\big)\prod_{j=1}^d(\alpha_j-1)\notag\\
-% &\le\frac{|a_da_0|}{M(P)}\bigg(\bigg(\frac{M(P)}{|a_0|}\bigg)^{1/(d-k)}-1\bigg)^{d-k}\bigg(\bigg(\frac{M(P)}{|a_d|}\bigg)^{1/k}-1\bigg)^k\notag\\
-% &= M(P)^{-1}\big(M(P)^{1/(d-k)}-|a_0|^{1/(d-k)}\big)^{d-k}\big(M(P)^{1/k}-|a_d|^{1/k}\big)^k\notag\\
-% &\le M(P)^{-1}\big(M(P)^{1/(d-k)}-1\big)^{d-k}\big(M(P)^{1/k}-1\big)^k,\label{eq:2}
-% \end{align}
-% %
-% \begin{equation}\label{eq:3}
-% \begin{split}
-%  \varOmega
-% &=\big\{(r,z){:}\ \,0<r<R,\ 0<z<H\big\},\\
-%  \varOmega_0
-% &=\big\{(r,z){:}\ \,r^2+z^2<R_0^2,\ z>0\big\},\\
-%  \varGamma_1
-% &=\big\{(r,0){:}\ \,0\le r\le R\big\},\\
-%  \varGamma
-% &=\big\{(0,z){:}\ \,0<z\le H\big\}\cup\big\{(R,z){:}\ \,0<z\le H\big\}\\
-% &\quad\cup\big\{(r,H){:}\ \,0<r<R\big\}\cup\varGamma_1,
-% \end{split}
-% \end{equation}
-% %
-% \begin{equation*}
-% u_{ij}=u(r_i,z_j,t),\qquad v_{ij}=v(r_i,z_j,t),\qquad d_{\alpha,ij}=d_{\alpha}(r_i,z_j), \\
-% \end{equation*}
-% %
-% $i=0,1,\ldots,N$, $j=0,1,\ldots,M_\alpha$, $\alpha=1,2$.
-
-% GS guarantees that the asymptotic dynamics of the response system is independent of its initial conditions and is completely determined by the driving system. Geometrically, this implies a collapse of the overall evolution onto a stable synchronization manifold $M=\{(X,Y){:}\ \,\varPhi(X)=Y\}$ in the full phase space of the two systems $X\oplus Y$. It is easy to show that the linear stability of the identity manifold $Y'=Y$ in the extended phase space $X\oplus Y\oplus Y'$ is equivalent to the linear stability of the manifold $M=\{(X,Y){:}\ \,\varPhi(X)=Y\}$ in the original $X \oplus Y$ phase space.
-
-% \subsection{The following excerpt demonstrates presentation of an algorithm}\label{s:2.2}
-% %
-% {\small
-% \begin{alltt}
-% Input: A list of segmentation parameters and the
-%        corresponding \(C1\), \(C2\) and \(C3\) values.
-
-% Output: A selection of the optimum segmentation and its
-%        parameters.
-
-%  BEGIN
-%        Search the input list for local minima in \(C2\),
-%        and list the local minima into \(L\);
-
-%        Search \(L\) and locate the minimum of \(C1 + 10 C3\sp{2}\),
-%        present this element of \(L\) as the result;
-%  END
-% \end{alltt}}
-
-% \subsection{Just another excerpt presenting image}\label{s:2.3}
-
-% In the works of S.\ Fu\v{c}\'ik, this spectrum was studied first as an object related to ``slightly'' nonlinear problems.\ The interest in these type of problems grew also in connection with the theory of suspension bridges (see, e.g., \cite{LazerSIAM}).\ From the mathematical point of view, the Fu\v{c}\'ik equation became a source of numerous investigations generalizing and refining the results by Fu\v{c}\'ik.
-
-% The Fu\v{c}\'ik equation with Sturm--Liouville conditions has similar structure of spectrum, and the description of it can be found in \cite{dancer} or \cite{Fucik}.
-
-% Completely different spectrum was obtained for the problem composed of equation
-% %
-% \begin{equation} \label{eq:4}
-% x''=-\mu x^{+}+\lambda x^{-}
-% \end{equation}
-% %
-% with nonlocal conditions
-% %
-% \begin{equation} \label{eq:5}
-% x(0)=0, \qquad \int\limits_0^1 x(s)\,\mathrm{d}s=0.
-% \end{equation}
-% %
-
-% A recent paper \cite{sergejevaLUMII} deals with the problem composed of equation \eqref{eq:4} with conditions
-% %
-% \begin{equation} \label{eq:6}
-% x'(0)=0, \qquad \int\limits_0^1x(s)\,\mathrm{d}s=0.
-% \end{equation}
-
-% %
-% \paragraph{Author Contributions.} All Authors (FN.LN., FN2.LN2. and FN3.LN3.) have contributed as follows: methodology,
-% FN.LN.; formal analysis, FN.LN., and FN2.LN2.; software, FN3.LN3.; validation, FN3.LN3.; writing – original draft preparation, FN.LN., and FN3.LN3.; writing – review and editing, FN.LN., FN2.LN2., and FN3.LN3. All authors have read and approved the published version of the manuscript.
+\section{Notes}\label{s:3}
+Some notes to keep in mind:
+\begin{itemize}
+  \item Proving convergence of the iterative scheme.
+  \item Leveraging the identifiability conditions presented in \cite{guan2024identifyingdriftdiffusioncausal}.
+\end{itemize}
 
 
-% % ----------------------------------------------------------------
-
-% \paragraph{Conflicts of Interest.} The authors declare no conflicts of interest.
-
-% \paragraph{Acknowledgment.}
-% % ----------------------------------------------------------------
-% We would like to thank dr. N. Sergejeva for the excerpts of article \cite{2014SergejevaN}.
-
-% \bibliographystyle{NAplain}
-% \bibliography{main}
+\bibliographystyle{NAplain}
+\bibliography{main}
 
 \end{sloppypar}
 \end{document}
