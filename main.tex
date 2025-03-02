@@ -53,7 +53,7 @@ In a conventional setting, we have a time-series dataset $\{\mathbf{X}^{(m)}\}_{
 \]
 where $\mathbf{X}_{i}^{(m)}$ can be vectors ($\mathbf{X}_{i}^{(m)} \in \mathbf{R}^d$) or matrices
 ($\mathbf{X}_{i}^{(m)} \in \mathbf{R}^{t \times d}$), depending on the unit of time being considered
-here is a single time step or a period of many steps. Here we consider the latter matrix case.
+here is a single time step or a period of $t$ steps. Here we consider the latter matrix case.
 Each of these trajectories describe patient records across \(T\) time periods
 (e.g., patient measurements throughout \(T\) hours).
 
@@ -73,7 +73,9 @@ differential equation (SDE), which has the form:
 \;+\; 
 \mathbf{G}\mathrm{d}\mathbf{W}_t,
 \]
-with unknown drift-diffusion parameters $\mathbf{A}$ and $\mathbf{G}$. The aim is to:
+with unknown drift-diffusion parameters $\mathbf{A} \in \mathbf{R}^{d \times d}$ and
+$\mathbf{G} \in \mathbf{R}^{d \times m}$. $\mathbf{W}$ is an $m$-dimensional Brownian motion.
+Our aim is to:
 \begin{enumerate}
 \item Reconstruct missing segments into full (or partially completed) trajectories
 $\{\widetilde{\mathbf{X}}^{(m)}\}$. This aim is intermediate.
@@ -122,7 +124,9 @@ iterative scheme as follows:
     \Omega_{\mathrm{DAG}}\bigl(\{\widetilde{\mathbf{X}}^{(m)}\}\bigr)
     = \alpha (h(\mathbf{A})),
     \]
-    where it is proved in the \cite{zheng2018dagstearscontinuousoptimization} that
+    where $d$ is the number of variables (i.e. the size of the square matrix
+    $\mathbf{A}$) and $\alpha$ is a regularization hyper-parameter.
+    It is proved in \cite{zheng2018dagstearscontinuousoptimization} that
     $h(\mathbf{A}) = 0$ if and only if $\mathbf{A}$,
     our adjacency matrix, corresponds to a DAG (no directed cycles). If cycles exist,
     $h(\mathbf{A}) > 0$. Hence, adding this term as a penalty encourages $\mathbf{A}$
