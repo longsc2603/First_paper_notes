@@ -27,7 +27,7 @@ Applied Artificial Intelligence Institute (A2I2)\\
 Deakin University\\
 \today\\[24pt]
 \LARGE
-\textbf{Problem Notes}\\[6pt]
+\textbf{Problem Overview}\\[6pt]
 \small
 \textbf {Long Van Tran}\\[6pt]
 s224930257@deakin.edu.au\\[6pt]
@@ -44,25 +44,18 @@ s224930257@deakin.edu.au\\[6pt]
 % \end{abstract}
 
 
-\section{Problem Statement}\label{s:1}
+\section{Problem Setting}\label{s:1}
 In a conventional setting, we have a time-series dataset $\{\mathbf{X}^{(m)}\}_{m=1}^M$,
 \[
 \mathbf{X}^{(m)} 
 = 
-\bigl[\mathbf{X}_{1}^{(m)}, \mathbf{X}_{2}^{(m)}, \ldots, \mathbf{X}_{T}^{(m)}\bigr],
+\bigl[\mathbf{X}_{t_{1}}^{(m)}, \mathbf{X}_{t_{2}}^{(m)}, \ldots, \mathbf{X}_{t_{k}}^{(m)}\bigr],
 \]
-where $\mathbf{X}_{i}^{(m)}$ can be vectors ($\mathbf{X}_{i}^{(m)} \in \mathbf{R}^d$) or matrices
-($\mathbf{X}_{i}^{(m)} \in \mathbf{R}^{t \times d}$), depending on the unit of time being considered
-here is a single time step or a period of $t$ steps. Here we consider the latter matrix case.
-Each of these trajectories describe patient records across \(T\) time periods
-(e.g., patient measurements throughout \(T\) hours).
-
-However, due to various practical reasons (such as data anonymization, 
-incomplete data logs, etc.), the temporal ordering (i.e. the time dimension) is lost.
-Furthermore, the trajectory data is also missing, with the assumption that for each of
-T time period, there is always at least one trajectory with data present. Thus, instead
-of a temporally-labeled complete dataset $\{\mathbf{X}^{(m)}\}_{m=1}^M$,
-we have a dataset of M temporally-unordered partially-completed trajectories.
+where $\mathbf{X}_{t_{i}}^{(m)}$ can be vectors ($\mathbf{X}_{t_{i}}^{(m)} \in \mathbf{R}^d$) or matrices
+($\mathbf{X}_{t_{i}}^{(m)} \in \mathbf{R}^{t \times d}$), depending on the unit of time being considered
+here is a single time step or a segment of $t$ steps. Here we consider the latter matrix case.
+Each of these trajectories describe patient records across \(k\) time points/segments
+(e.g., patient measurements throughout \(k\) hours).
 
 We assume that the data is governed by a time-homogeneous linear additive noise stochastic
 differential equation (SDE), which has the form:
@@ -75,19 +68,38 @@ differential equation (SDE), which has the form:
 \]
 with unknown drift-diffusion parameters $\mathbf{A} \in \mathbf{R}^{d \times d}$ and
 $\mathbf{G} \in \mathbf{R}^{d \times m}$. $\mathbf{W}$ is an $m$-dimensional Brownian motion.
-Our aim is to:
-\begin{enumerate}
-\item Reconstruct missing segments into full (or partially completed) trajectories
-$\{\widetilde{\mathbf{X}}^{(m)}\}$. This aim is intermediate.
-\item Estimate $\mathbf{A}$ and $\mathbf{G}$ by maximum likelihood, while enforcing a Directed
-Acyclic Graph (DAG) constraint on the global ordering of the reconstructed segments
-(thus avoiding ``cyclic'' order). This is our final and most important aim.
-\end{enumerate}
+
+However, due to various practical reasons (such as data anonymization, 
+incomplete data logs, etc.), the temporal ordering
+(i.e. the time dimension) might be lost or the time values 
+at which measurements are taken might be noisy (measurement errors).
+Thus, we want to find solutions for these complex real-world challenges.
+
+\subsection{Data without Temporal Order}
+Our first data complication is measurements taken without any temporal order. Usually,
+in a time-series dataset we would know the process states through a sequence of time steps.
+But when this "hidden" time dimension is lost, we face another challenge of sorting the data
+in the correct temporal order before using it to infer the underlying SDE's parameters.
+
+\subsection{Noisy Data Measurements}
+Other than missing temporal order completely, another complication that can happen to
+our data is noisy measurements, whereas our data is either measured incorrectly,
+or the time at which measurements are taken are logged incorrectly. In other words,
+either the data values $\mathbf{X}_{t_{i}}^{(m)}$ or their corresponding time points
+$t_{i}$ are presented with independent,
+randomly distributed noise.
+
+For both these data settings, our aim is to estimate the parameters $\mathbf{A}$ and
+$\mathbf{G}$ while enforcing a Directed Acyclic Graph (DAG) constraint on the
+adjacency matrix $\mathbf{A}$ (thus avoiding ``cyclic'' order).
 
 \section{Proposed Method}\label{s:2}
-We proposed a solution that works as follows:
+For each of the two mentioned data complications, we proposed a solution outlined as follow:
 
-\paragraph{2.1. Sorting Data by Variance}
+\subsection{Data without Temporal Order}
+This solution consists of two parts, whereas part two is a two-step iterative scheme where
+we estimate the parameters of the SDE.
+\subsubsection{Sorting Data by Variance}
 \begin{itemize}
   \item Empirically evaluate the variance of each observed segment of all
   our trajectories.
@@ -96,7 +108,7 @@ We proposed a solution that works as follows:
   variance over (hidden) time. This can be done in a similar manner for converging SDEs.
 \end{itemize}
 
-\paragraph{2.2. Iterative Two-Step Scheme} \mbox{}\\
+\subsubsection{Iterative Two-Step Scheme} \mbox{}\\
 First, we randomly initialize the parameters
 $\mathbf{A}^{(0)}$ and $\mathbf{G}^{(0)}$. Then, we follow a two-step
 iterative scheme as follows:
@@ -144,6 +156,62 @@ iterative scheme as follows:
     by Guan et al., 2024 \cite{guan2024identifyingdriftdiffusioncausal}.
   \end{enumerate}
 
+\subsection{Noisy Data Measurements}
+Based on the theory of Gaussian Process and the work of Mchutchon et al. \cite{NIPS2011_a8e864d0},
+we propose using the noisy input data/time steps to directly learn the underlying SDE's parameters.
+
+\subsubsection{Using a Gaussian Process Surrogate for the Drift}
+We want to estimate the drift function $f(x)$ of the SDE (in this case the matrix $\mathbf{A}$).
+But because we only observe noisy inputs $Y_t = X_t + \epsilon_t$ with $\epsilon_t \sim \mathcal{N}(0, \Sigma_x)$,
+fitting a standard GP to the pairs $(Y_t, Y'_t)$ would lead to biased estimates due to the input
+noise. This uncertainty in $Y_t$ affects the estimate of $f(x)$ non-uniformly — especially in regions
+where $f(x)$ changes rapidly.
+
+To account for this, we:
+\begin{itemize}
+  \item Treat the Euler–Maruyama-discretized form as a supervised learning problem, whereas:
+        \[
+          Y_{t+1} \approx Y_t + AY_tdt + \text{noise}
+        \]
+  \item Fit a GP to the pairs $\{(Y_t, Y_{t+1})\}$. This GP will provide a posterior mean function
+        $\bar{f}(x) \approx \mathbf{A}x$, which allows us to compute the gradient $\nabla \bar{f}(x)$
+        analytically. Note that in GPs, derivatives are also GPs and easy to compute.
+\end{itemize}
+
+\subsubsection{Applying Noisy-Input GP (NIGP) Correction}
+NIGP use the first-order Taylor expansion of $f(x + \epsilon_x)$ around the mean input $x$:
+\[
+  f(x + \epsilon_x) \approx f(x) + \nabla\bar{f}(x)^T \epsilon_x
+\]
+Then, the variance in the output due to input noise is approximately:
+\[
+  \text{Var}[x + \epsilon_x] \approx \nabla\bar{f}(x)^T \Sigma_x \nabla\bar{f}(x) \approx \nabla\bar{f}(y)^T \Sigma_x \nabla\bar{f}(y)
+\]
+Thus, the GP posterior is corrected with this heteroscedastic variance term instead of assuming
+constant noise variance $\Sigma_y$:
+\[
+  \text{Var}(y) = \Sigma_y + \nabla\bar{f}(y)^T \Sigma_x \nabla\bar{f}(y)
+\]
+This gives us a modified GP model that model input noise as heteroscedastic output noise — larger
+variance in high-gradient regions, tighter confidence in flatter regions.
+
+\subsubsection{Constructing Marginal Likelihood}
+The negative log likelihood (NLL) of the dataset under the GP with this structured noise becomes:
+\[
+  \text{log}p(Y_{t+1}|Y_t) = \frac{1}{2}\sum_{t} [(Y_{t+1}-\phi Y_t)^T(\Sigma_y+\phi^T\Sigma_x\phi)^{-1}(Y_{t+1}-\phi Y_t)+\text{log}|\Sigma_y+\phi^T\Sigma_x\phi|],
+\]
+where $\Sigma_x$ is the input noise covariance to be inferred. Maximizing the above NLL with respect to:
+\begin{itemize}
+  \item $\phi = I + Adt$ gives $\mathbf{A}$
+  \item $\Sigma_y = GG^Tdt$ gives $\mathbf{G}$
+\end{itemize}
+Our iterative procedure should be:
+\begin{enumerate}
+  \item Initialize $\mathbf{A}, \mathbf{A}, \Sigma_x$
+  \item Use GP with the input-dependent noise $\text{Var}(Y)$ above
+  \item Minimize the NLL with respect to parameters via gradients (using L-BFGS, Adam, ...)
+  \item Re-estimate gradients based on updated GP predictions and iterate
+\end{enumerate}
 \section{Notes}\label{s:3}
 Some notes to keep in mind:
 \begin{itemize}
