@@ -2,6 +2,20 @@ import numpy as np
 import matplotlib.pyplot as plt
 import itertools
 import scipy
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import math
+
+from dagma import utils
+from dagma.linear import DagmaLinear
+from dagma.nonlinear import DagmaMLP, DagmaNonlinear
+
+import causally.scm.scm as scm
+import causally.graph.random_graph as rg
+import causally.scm.noise as noise
+import causally.scm.causal_mechanism as cm
 
 from experiments import generate_independent_points, linear_additive_noise_data
 
@@ -111,7 +125,7 @@ def dag_penalty(A: np.ndarray, alpha: float = 0.1) -> float:
     # from the original NOTEARS paper, but it’s a practical placeholder.
 
     # "A ◦ A" is just A^2 elementwise
-    A_sq = np.multiply(A, A)
+    A_sq = np.multiply(torch.clone(A).detach().numpy(), torch.clone(A).detach().numpy())
     # Exponentiate elementwise
     exp_A_sq = scipy.linalg.expm(A_sq)
     trace_val = np.trace(exp_A_sq)
@@ -121,14 +135,14 @@ def dag_penalty(A: np.ndarray, alpha: float = 0.1) -> float:
 
 
 # TODO: Try some other convergence scores besides NLL
-def compute_nll(X: np.ndarray, A: np.ndarray, H: np.ndarray, dt: float) -> float:
+def compute_nll(X: np.ndarray, A: np.ndarray, G: np.ndarray, dt: float) -> float:
     """Compute the negative log-likelihood of the current segment under the
     current inferred model parameters.
 
     Args:
         X (np.ndarray): Segments, shape (num_time_steps, d)
         A (np.ndarray): Estimated drift matrix, shape (d, d)
-        H (np.ndarray): Estimated (observational) diffusion matrix, shape (d, m), H = G*G.T
+        G (np.ndarray): Estimated diffusion matrix, shape (d, m)
         dt (float): Time step size
 
     Returns:
@@ -137,27 +151,34 @@ def compute_nll(X: np.ndarray, A: np.ndarray, H: np.ndarray, dt: float) -> float
     nll = 0.0
     if len(X.shape) == 3:
         # this is the case of shape (num_segments, steps_per_segment, d)
-        X = np.reshape(X, (X.shape[0]*X.shape[1], X.shape[2]))
+        X = torch.reshape(X, (X.shape[0]*X.shape[1], X.shape[2]))
     num_steps, d = X.shape
-    H_dt = H * dt
+    H_dt = G*G.T*dt
+    H_dt_inv = G/dt # (H*dt)^-1 = dt^-1 * H^-1
     # quick fix, instead of getting logdet of H_dt, which
     # is -inf due to det(H_dt) = 0, we get logdet of H_dt + eps*I
     # This ensures that H_dt_reg = H + eps*I is full rank and invertible.
-    eps = 1e-3
-    H_dt_reg = eps*np.eye(H_dt.shape[0])
-    # Precompute inverse and determinant of H_dt
-    H_dt_inv = np.linalg.pinv(H_dt)
-    sign, logdet_H_dt = np.linalg.slogdet(H_dt_reg)
+    eps = 1e-2
+    H_dt_reg = H_dt + eps*torch.eye(H_dt.shape[0])
+    # Precompute determinant of H_dt
+    sign, logdet_H_dt = torch.linalg.slogdet(H_dt_reg)
+    logdet_G_dt = 2*torch.log(torch.linalg.det(G + torch.eye(G.shape[0]))) + np.log(np.pow(dt, d))
+    # logdet_G_dt = 2*torch.log(torch.linalg.det(G)) + np.log(np.pow(dt, d))
     const_term = 0.5 * (d * np.log(2 * np.pi) + logdet_H_dt)
+    const_term_G = 0.5 * (d * np.log(2 * np.pi) + logdet_G_dt)
+    if math.isnan(const_term_G.item()):
+        print(G, 'G')
+        print(logdet_G_dt, 'logdet_G')
     for t in range(num_steps - 1):
         X_t = X[t]
         X_tp1 = X[t + 1]
-        # Compute mean: mu_t = e^{A dt} X_t (approximate if needed)
-        mu_t = np.exp(A*dt)@X_t
-        # mu_t = X_t + A @ X_t * dt  # Using Euler-Maruyama approximation
+        # Compute mean: mu_t = e^{A dt}  X_t (approximate if needed)
+        # mu_t = torch.exp(A*dt)@X_t
+        mu_t = X_t + A @ X_t * dt  # Using Euler-Maruyama approximation
         diff = X_tp1 - mu_t
         exponent = 0.5 * diff.T @ H_dt_inv @ diff
-        nll += exponent + const_term
+        nll += exponent + const_term_G
+    
     return nll
 
 
@@ -204,7 +225,7 @@ def compute_nlp(A: np.ndarray, H: np.ndarray, nll: float) -> float:
 def reorder_trajectories(
     data: np.ndarray,
     A: np.ndarray,
-    H: np.ndarray,
+    G: np.ndarray,
     time_step_size: float,
     alpha: float = 0.5,
     known_initial_value: bool = False
@@ -216,7 +237,7 @@ def reorder_trajectories(
         data (np.ndarray): Arrays of trajectory to be re-ordered,
             shape (num_trajectories, num_segments, points_per_segment, d).
         A (np.ndarray): Current estimated drift matrix, shape (d, d).
-        H (np.ndarray): Current estimated (observational) diffusion matrix, shape (d, d).
+        G (np.ndarray): Current estimated diffusion matrix, shape (d, m).
         time_step_size (float): Step size with respect to time between points.
         alpha (float, optional): Regularization hyper-parameter. Defaults to 0.1.
         known_initial_value (bool, optional): If True, the initial values of trajectories
@@ -250,13 +271,13 @@ def reorder_trajectories(
         for candidate_order in all_indices_permutations:
             # candidate_order is a list of 2D arrays, now we stack it 
             # to get the trajectory to compute NLL
-            reordered_trajectory = np.stack(candidate_order, axis=0)
+            reordered_trajectory = torch.stack(candidate_order, axis=0)
             # Evaluate the negative log-likelihood
-            nll = compute_nll(reordered_trajectory, A, H, time_step_size)
-            nlp = compute_nlp(nll=nll, A=A, H=H)
+            nll = compute_nll(reordered_trajectory, A, G, time_step_size)
+            # nlp = compute_nlp(nll=nll, A=A, H=H)
             # Also compute a DAG penalty on A
             penalty = dag_penalty(A, alpha)
-            loss = nlp + penalty
+            loss = nll + penalty
 
             # quick, dirty fix
             if loss == -(np.inf):
@@ -269,6 +290,7 @@ def reorder_trajectories(
 
         # Update the current trajectory randomly to one of the best trajectories just found
         probabilities = list(best_orderings.keys())
+        probabilities = [torch.clone(item).detach().numpy() for item in probabilities]
         # [-200, -4, 0, 52] --> [0, 196, 200, 252]
         probabilities = [float(item) + abs(float(np.min(probabilities))) for item in probabilities]
         # [0, 196, 200, 252] --> [0, 196/252, 200/252, 1]
@@ -283,176 +305,70 @@ def reorder_trajectories(
     return data
 
 
-# def update_sde_parameters(
-#     trajectories: np.ndarray
-#     ) -> tuple[np.ndarray, np.ndarray]:
-#     """Given fully assembled (completed) trajectories, estimate (A, H)
-#     by maximizing the discrete-time likelihood of the linear SDE.
-#     We have:
-#         X_{t+1} - X_t = A*X_t + noise,
-#         noise ~ N(0, H), H = G*G^T
-    
-#     Steps:
-#         1. Compute A = (Sum of y_t*x_t^T)*(Sum of x_t*x_t^T)^(-1)
-#             where y_t = X_{t+1} - X_t
-#         2. Residuals e_t = y_t - A*x_t
-#         3. Sigma = average of e_t*e_t^T
+class DriftNetwork(nn.Module):
+    def __init__(self, d, init_scale=0.01):
+        super().__init__()
+        # A is a learnable parameter matrix of shape (d, d)
+        A_init = init_scale * torch.randn(d, d)
+        self.A = nn.Parameter(A_init)
 
-#     Args:
-#         trajectories (np.ndarray): Input data, shape (num_trajectories, num_steps, d)
+    def forward(self):
+        # Returns the drift matrix A of shape (d, d)
 
-#     Returns:
-#         (np.ndarray, np.ndarray): Estimated A, H matrices to be updated
-#     """
-#     # Sum_xx and Sum_yx
-#     d = trajectories.shape[-1]  # dimension
-#     Sum_xx = np.zeros((d, d))
-#     Sum_yx = np.zeros((d, d))
-#     count = 0
-    
-#     # 1) Accumulate sums
-#     for traj in trajectories:
-#         num_steps = traj.shape[0]
-#         for t in range(num_steps - 1):
-#             x_t = traj[t]          # shape (d,)
-#             x_next = traj[t+1]
-#             y_t = x_next - x_t     # shape (d,)
-#             # y_t*x_t^T is (d x d)
-#             # x_t*x_t^T is (d x d)
-#             Sum_yx += np.outer(y_t, x_t)
-#             Sum_xx += np.outer(x_t, x_t)
-#             count += 1
-    
-#     # 2) Solve for A
-#     # A = (Sum of y_t*x_t^T) (Sum of x_t*x_t^T)^(-1)
-#     # We'll do a pseudo-inverse if necessary.
-#     try:
-#         inv_Sum_xx = np.linalg.inv(Sum_xx)
-#     except np.linalg.LinAlgError:
-#         inv_Sum_xx = np.linalg.pinv(Sum_xx)
-    
-#     A_est = Sum_yx @ inv_Sum_xx
-    
-#     # 3) Compute residuals & estimate Sigma
-#     #    e_t = y_t - A*x_t
-#     #    Sigma = sum(e_t*e_t^T)/count
-#     sum_ee = np.zeros((d, d))
-    
-#     for traj in trajectories:
-#         num_steps = traj.shape[0]
-#         for t in range(num_steps - 1):
-#             x_t = traj[t]
-#             x_next = traj[t+1]
-#             y_t = x_next - x_t
-#             e_t = y_t - A_est @ x_t
-#             sum_ee += np.outer(e_t, e_t)
-    
-#     H_est = sum_ee / count
-    
-#     return A_est, H_est
+        return self.A
 
 
-def left_Var_Equation(A1, B1):
-    """Stable solver for np.matmul(sum_Edxt_Ext, np.linalg.pinv(sum_Ext_ExtT)) * (1 / dt)
-    via least squares formulation of XA = B  <=> A^T X^T = B^T.
-    This function is from the APPEX paper.
-    """
-    m = B1.shape[0]
-    n = A1.shape[0]
-    X = np.zeros((m, n))
-    for i in range(m):
-        X[i, :] = np.linalg.lstsq(np.transpose(A1), B1[i, :], rcond=None)[0]
-    return X
+class DiffusionNetwork(nn.Module):
+    def __init__(self, d, m=1, init_scale=0.01):
+        super().__init__()
+        # G is a learnable parameter matrix of shape (d, m)
+        G_init = init_scale * torch.randn(d, m)
+        self.G = nn.Parameter(G_init)
 
+    def forward(self):
+        # Returns the drift matrix G of shape (d, m)
 
-def update_sde_parameters(X, dt, T, pinv=False):
-    """Calculate the approximate closed form estimator A_hat for
-    time homogeneous linear drift from multiple trajectories.
-    This function is from the APPEX paper.
-
-    Args:
-        X (numpy.ndarray): 3D array (num_trajectories, num_steps, d),
-            where each slice corresponds to a single trajectory.
-        dt (float): Discretization time step.
-        T (float): Total time period.
-        pinv: whether to use pseudo-inverse. Otherwise, we use left_Var_Equation.
-            Defaults to False.
-
-    Returns:
-        numpy.ndarray: Estimated drift-diffusion matrices A, H given the set of trajectories
-    """
-    num_trajectories, num_steps, d = X.shape
-    sum_Edxt_Ext = np.zeros((d, d))
-    sum_Ext_ExtT = np.zeros((d, d))
-    for t in range(num_steps - 1):
-        sum_dxt_xt = np.zeros((d, d))
-        sum_xt_xt = np.zeros((d, d))
-        for n in range(num_trajectories):
-            xt = X[n, t, :]
-            dxt = X[n, t + 1, :] - X[n, t, :]
-            sum_dxt_xt += np.outer(dxt, xt)
-            sum_xt_xt += np.outer(xt, xt)
-        sum_Edxt_Ext += sum_dxt_xt / num_trajectories
-        sum_Ext_ExtT += sum_xt_xt / num_trajectories
-
-    # Add a small regularization term I*epsilon to ensure full-rank
-    eps = 1e-4
-    sum_Ext_ExtT_reg = sum_Ext_ExtT + eps*np.eye(d)
-
-    if pinv:
-        A_est = np.matmul(sum_Edxt_Ext, np.linalg.pinv(sum_Ext_ExtT_reg)) * (1 / dt)
-    else:
-        A_est = left_Var_Equation(sum_Ext_ExtT_reg, sum_Edxt_Ext * (1 / dt))
-
-    # Initialize the GG^T matrix
-    GGT = np.zeros((d, d))
-
-    if A_est is None:
-        # Compute increments ΔX for each trajectory (no drift adjustment)
-        increments = np.diff(X, axis=1)
-    else:
-        # Adjust increments by subtracting the deterministic drift: ΔX - A * X_t * dt
-        increments = np.diff(X, axis=1) - dt * np.einsum('ij,nkj->nki', A_est, X[:, :-1, :])
-
-    # Sum up the products of increments for each dimension pair across all trajectories and steps
-    for i in range(d):
-        for j in range(d):
-            GGT[i, j] = np.sum(increments[:, :, i] * increments[:, :, j])
-
-    # Divide by total time T*num_trajectories to normalize
-    GGT /= T * num_trajectories
-
-    return A_est, GGT
+        return self.G
 
 
 def estimate_sde_parameters(
     data: np.ndarray,
+    drift_net, diff_net,
     time_step_size: float,
     T: float,
     true_A: np.ndarray,
-    true_H: np.ndarray,
+    true_G: np.ndarray,
+    lr: float = 5e-2,
     max_iter: int = 10,
     alpha: float = 0.1,
     known_initial_value: bool = False
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[DriftNetwork, DiffusionNetwork]:
     """Main iterative scheme:
     1) Reconstruct / reorder segments using the current (A, G).
     2) Re-estimate A, G from the newly-reconstructed data.
 
     Args:
         data (np.ndarray): Input data, shape (num_trajectories, num_segments, points_per_segment, d)
-        time_step_size (float): Step size with respect to time between points.
+        time_step_size (float): Step size with respect to time between points.        
+        drift_net: NN for A
+        diff_net:  NN for G
         T (float): Time period.
         true_A (nd.ndarray): True drift matrix A. Used for computing MAE.
-        true_H (nd.ndarray): True (observational) diffusion matrix H (= G*G.T). Used for computing MAE.
+        true_G (nd.ndarray): True diffusion matrix G. Used for computing MAE.
+        lr (float): Learning rate.
         max_iter (int, optional): Maximum number of iterations. Defaults to 10.
         alpha (float, optional): Regularization hyper-parameter. Defaults to 0.1.
         known_initial_value (bool, optional): If True, the initial values of trajectories
             are known beforehand, and should stay fixed. Defaults to False.
 
     Returns:
-        tuple[np.ndarray, np.ndarray]: The estimated drift-diffusion matrices (A, G)
+        tuple[DriftNetwork, DiffusionNetwork]: The estimated NN for the matrices (A, G)
     """
+    optimizer = optim.Adam(
+        list(drift_net.parameters()) + list(diff_net.parameters()),
+        lr=lr,
+        betas=(0.9, 0.99)
+    )
     # 1) Sort all segments in each trajectory by variance
     reordered_data = sort_data_by_var(data, decreasing_var=False,
                                       known_initial_value=known_initial_value) # assuming diverging SDEs
@@ -463,62 +379,76 @@ def estimate_sde_parameters(
     # re-ordered again.
     num_segments = reordered_data.shape[1]
     steps_per_segment = reordered_data.shape[2]
-    reordered_data = np.reshape(reordered_data, (num_trajectories,
+    reordered_data = torch.Tensor(reordered_data)
+    reordered_data = torch.reshape(reordered_data, (num_trajectories,
                                                  num_segments*steps_per_segment, d))
 
     # 2) Iterative scheme for estimating SDE parameters
     all_nlls = []
     all_nlps = []
     all_mae_a = []
-    all_mae_h = []
+    all_mae_g = []
     best_nll = np.inf
     best_nlp = np.inf
-    best_ordered_data = np.copy(reordered_data)
+    best_ordered_data = torch.clone(reordered_data)
     for iteration in range(max_iter):
         # Update SDE parameters A, G using MLE with the newly completed data
-        A, H = update_sde_parameters(reordered_data, dt=time_step_size, T=T)
-
-        # Transform the data
-        reordered_data = np.reshape(reordered_data,
-                                    (num_trajectories, num_segments,
-                                    steps_per_segment, d))
-        # Reconstruct / reorder segments to maximize LL - DAG penalty
-        reordered_data = reorder_trajectories(reordered_data, A, H, time_step_size, alpha,
-                                              known_initial_value=known_initial_value)
-
-        # Transform the data back to its previous shape
-        reordered_data = np.reshape(reordered_data, (num_trajectories,
-                                                    num_segments*steps_per_segment, d))
-
+        optimizer.zero_grad()
         average_nll = 0.0
         average_nlp = 0.0
         for traj in range(num_trajectories):
-            nll = compute_nll(reordered_data[traj], A, H, dt=time_step_size)
+            A = drift_net()
+            G = diff_net()
+            nll = compute_nll(reordered_data[traj], A, G, dt=time_step_size)
             average_nll += nll
-            average_nlp += compute_nlp(nll=nll, A=A, H=H)
+            # average_nlp += compute_nlp(nll=nll, A=A, H=G*G.T)
 
         average_nll = average_nll/num_trajectories
-        average_nlp = average_nlp/num_trajectories
-        MAE_A = np.mean(np.abs(A - true_A))
-        MAE_H = np.mean(np.abs(H - true_H))
-        print(f"Iteration {iteration+1}:\nNLL = {average_nll:.3f}\nNLP = {average_nlp:.3f}\nMAE to true A = {MAE_A:.3f}\nMAE to true H = {MAE_H:.3f}")
+        # average_nlp = average_nlp/num_trajectories
+
+        average_nll.backward()
+        torch.nn.utils.clip_grad_norm_(list(drift_net.parameters()) + list(diff_net.parameters()), 100.0)
+        for name, p in drift_net.named_parameters():
+            p_before = torch.clone(p.data)
+            print(name, 'before: ', p.data)
+            print(name, 'grad: ', p.grad)
+        optimizer.step()
+        for name, h in drift_net.named_parameters():
+            print(name, 'after: ', h.data)
+            print("Change:", (h.data - p_before))
+
+        MAE_A = np.mean(np.abs(torch.clone(A).detach().numpy() - true_A))
+        MAE_G = np.mean(np.abs(torch.clone(G).detach().numpy() - true_G))
+        print(f"Iteration {iteration+1}:\nNLL = {average_nll:.3f}\nMAE to true A = {MAE_A:.3f}\nMAE to true G = {MAE_G:.3f}")
         
         all_nlls.append(average_nll)
-        all_nlps.append(average_nlp)
+        # all_nlps.append(average_nlp)
         all_mae_a.append(MAE_A)
-        all_mae_h.append(MAE_H)
-        # if average_nll < best_nll:
-        #     best_nll = average_nll
+        all_mae_g.append(MAE_G)
+        if average_nll < best_nll:
+            best_nll = average_nll
+            best_ordered_data = torch.clone(reordered_data)
+        # if average_nlp < best_nlp:
+        #     best_nlp = average_nlp
         #     best_ordered_data = np.copy(reordered_data)
-        if average_nlp < best_nlp:
-            best_nlp = average_nlp
-            best_ordered_data = np.copy(reordered_data)
+        
+        # Transform the data
+        reordered_data = torch.reshape(reordered_data,
+                                    (num_trajectories, num_segments,
+                                    steps_per_segment, d))
+        # Reconstruct / reorder segments to maximize LL - DAG penalty
+        reordered_data = reorder_trajectories(reordered_data, A, G*G.T, time_step_size, alpha,
+                                              known_initial_value=known_initial_value)
 
-    return A, H, reordered_data, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_h
+        # Transform the data back to its previous shape
+        reordered_data = torch.reshape(reordered_data, (num_trajectories,
+                                                    num_segments*steps_per_segment, d))
+
+    return A, G, reordered_data, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_g
 
 
 def run_experiment(
-    T: float, d: int, dt: float,
+    T: float, d: int, dt: float, lr: float,
     num_trajectories: int,
     version: int = 3, max_iter: int = 20,
     known_initial_value: bool = False):
@@ -528,6 +458,7 @@ def run_experiment(
         T (float): Time period.
         d (int): Variables dimension.
         dt (float): Time step size.
+        lr (float): Learning rate.
         num_trajectories (int): Number of trajectories.
         version (int, optional): Versions of experiment, as follow:
             Version 1: only noise, drift term is zero.
@@ -538,6 +469,8 @@ def run_experiment(
         known_initial_value (bool, optional): If True, the initial values of trajectories
             are known beforehand, and should stay fixed. Defaults to False.
     """
+    drift_net = DriftNetwork(d=d)
+    diff_net = DiffusionNetwork(d=d, m=d)
     if version == 1:
         A = np.zeros((d, d))
         G = np.ones((d, d)) * 5
@@ -545,16 +478,60 @@ def run_experiment(
         # our_data = data_masking(our_data)
         pass
     elif version == 3:
-        A = np.ones((d, d)) * 5
-        G = np.ones((d, d)) * 1.5
+        # A = np.ones((d, d)) * 5
+        # G = np.ones((d, d)) * 2.5
+        A = np.random.rand(d, d) * 5
+        G = np.random.rand(d, d) * 2.5
     
-    # Generating data
+    # Data generated for testing DAGMA
+    utils.set_random_seed(1)
+    # Create an Erdos-Renyi DAG of 20 nodes and 20 edges in expectation with Gaussian noise
+    # number of samples n = 500
+    n, d, s0 = 500, 20, 20
+    graph_type, sem_type = 'ER', 'gauss'
+
+    B_true = utils.simulate_dag(d, s0, graph_type)
+    W_true = utils.simulate_parameter(B_true)
+    # X = utils.simulate_linear_sem(W_true, n, sem_type)
+    # print(W_true)
+
+    # A = W_true
+    # # print(A, "A")
+    # G = np.ones((d, d))
+
+    # Generating data by APPEX
     points = generate_independent_points(d, d)
     X0_dist = [(point, 1 / len(points)) for point in points]
     X_appex = linear_additive_noise_data(
         num_trajectories=num_trajectories, d=d, T=T, dt_EM=dt, dt=dt,
         A=A, G=G, sample_X0_once=True, X0_dist=X0_dist)
     print(X_appex.shape)
+
+    # # causally package
+    # # Erdos-Renyi graph generator
+    # graph_generator = rg.ErdosRenyi(num_nodes=d, expected_degree=1)
+
+    # # Generator of the noise terms
+    # noise_generator = noise.MLPNoise()
+
+    # # Nonlinear causal mechanisms (parametrized with a random neural network)
+    # causal_mechanism = cm.NeuralNetMechanism()
+
+    # # Generated the data
+    # model = scm.LinearModel(
+    #     num_samples=1000,
+    #     graph_generator=graph_generator,
+    #     noise_generator=noise_generator,
+    #     causal_mechanism=causal_mechanism,
+    #     seed=42
+    # )
+    # dataset, groundtruth = model.sample()
+    # print(groundtruth.shape)
+
+    model = DagmaLinear(loss_type='l2') # create a linear model with least squares loss
+    W_est = model.fit(np.reshape(X_appex[:, 5, :], (500, 20)), lambda1=0.02) # fit the model with L1 reg. (coeff. 0.02)
+    # W_est = model.fit(dataset, lambda1=0.02) # fit the model with L1 reg. (coeff. 0.02)
+    print(W_est.shape, "W_est")
     
     # Reshape data from shape (num_trajectories, num_steps, d)
     # to shape (num_trajectories, num_segment, steps_per_segment, d)
@@ -575,19 +552,12 @@ def run_experiment(
             random_X[i] = X_appex[i, permutation_id, :, :]
 
     # Estimating SDE's parameters A, G
-    estimated_A, estimated_H, reordered_X, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_h = \
-        estimate_sde_parameters(random_X, time_step_size=0.05, T=T, max_iter=max_iter, true_A=A,
-                                true_H=G*G.T, known_initial_value=known_initial_value)
+    estimated_A, estimated_G, reordered_X, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_g = \
+        estimate_sde_parameters(random_X, drift_net, diff_net, time_step_size=0.05, T=T,
+                                max_iter=max_iter, true_A=A, true_G=G,
+                                lr=lr, known_initial_value=known_initial_value)
     all_nlls = [float(item) for item in all_nlls]
-    # We'll use Cholesky if H_est is positive definite
-    # else fallback to sqrtm or pseudo-chol
-    try:
-        estimated_G = np.linalg.cholesky(estimated_H)
-    except np.linalg.LinAlgError:
-        # if not SPD, do a symmetric sqrt
-        from scipy.linalg import sqrtm
-        estimated_G = sqrtm(estimated_H)
-        # If it still fails, consider a small regularization
+
     print(estimated_A, "A")
     print(estimated_G, "G")
 
@@ -599,20 +569,34 @@ def run_experiment(
     # ---------------------------------------------------------
     # Plot each trajectory (each sub-array along axis=0)
     # ---------------------------------------------------------
-    fig = plt.figure(figsize=(10, 10))
-    ax1 = fig.add_subplot(2, 2, 1)
-    ax2 = fig.add_subplot(2, 2, 2)
-    ax3 = fig.add_subplot(2, 2, 3)
-    ax4 = fig.add_subplot(2, 2, 4)
+    fig = plt.figure(figsize=(12, 12))
+    # Create a 2x2 gridspec
+    gs = fig.add_gridspec(2, 2)
+
+    # Subplot for top-left
+    ax1 = fig.add_subplot(gs[0, 0])
+
+    # Now, subdivide the top-right section into two smaller subplots.
+    gs_top_right = gs[0, 1].subgridspec(2, 1)
+
+    ax2_top = fig.add_subplot(gs_top_right[0, 0])
+    ax2_bottom = fig.add_subplot(gs_top_right[1, 0])
+
+    # Subplot for bottom-left
+    ax3 = fig.add_subplot(gs[1, 0])
+
+    # Subplot for bottom-right
+    ax4 = fig.add_subplot(gs[1, 1])
 
     time = np.arange(num_points)
     num_iterations = np.arange(len(all_nlls))
     for i in range(X_appex.shape[0]):
         # data[i] is shape (num_points, 2)
         # Plot one line for each trajectory
-        ax1.plot(time, X_appex[i, :, 0], label=f"Trajectory {i}")
+        if i <= 5:
+            ax1.plot(time, X_appex[i, :, 0], label=f"Trajectory {i}")
         # ax2.plot(time, best_ordered_data[i, :, 0], label=f"Trajectory {i}")
-        if i <= 9:
+        if i <= 5:
             ax3.plot(time, reordered_X[i, :, 0], label=f"Trajectory {i}")
 
     ax1.set_xlabel('Time')
@@ -620,28 +604,30 @@ def run_experiment(
     ax1.set_title("Original data")
     # ax1.legend()
 
-    ax2.plot(num_iterations, all_mae_a, label=f"MAE to True A")
-    ax2.plot(num_iterations, all_mae_h, label=f"MAE to True H")
-    ax2.set_xlabel('Epoch')
-    ax2.set_ylabel('Mean Absolute Error')
-    ax2.set_title("MAE between the estimated and true params")
-    ax2.legend()
+    ax2_top.plot(num_iterations, all_mae_a, label=f"MAE to True A")
+    ax2_bottom.plot(num_iterations, all_mae_g, label=f"MAE to True G")
+    ax2_top.set_xlabel('Epoch')
+    ax2_top.set_ylabel('Mean Absolute Error')
+    ax2_bottom.set_xlabel('Epoch')
+    ax2_bottom.set_ylabel('Mean Absolute Error')
+    ax2_top.set_title("MAE between the estimated and true params")
+    ax2_top.legend()
+    ax2_bottom.legend()
 
     ax3.set_xlabel('Time')
     ax3.set_ylabel('Variable 0')
     ax3.set_title("Reconstructed data")
     ax3.legend()
 
-    ax4.plot(num_iterations, all_nlps)
-    ax4.set_xlabel('Epoch')
-    ax4.set_ylabel('Negative Log-Posterior')
-    ax4.set_title("Negative Log-Posterior through epochs")
-
-    # ax4.plot(num_iterations, all_nlls)
+    # ax4.plot(num_iterations, all_nlps)
     # ax4.set_xlabel('Epoch')
-    # ax4.set_ylabel('Negative Log-likelihood')
-    # ax4.set_title("Negative Log-likelihood through epochs")
-    # # ax4.legend()
+    # ax4.set_ylabel('Negative Log-Posterior')
+    # ax4.set_title("Negative Log-Posterior through epochs")
+
+    ax4.plot(num_iterations, all_nlls)
+    ax4.set_xlabel('Epoch')
+    ax4.set_ylabel('Negative Log-likelihood')
+    ax4.set_title("Negative Log-likelihood through epochs")
 
     plt.show()
 
@@ -650,17 +636,18 @@ def run_experiment(
 
 if __name__ == "__main__":
     # data generated by data_generation.py of APPEX code
-    d = 3
-    num_trajectories = 1000
+    d = 20
+    num_trajectories = 500
     max_iter = 10
     known_initial_value = True
 
     # Run different experiments
-    run_experiment(T=0.10, d=d, dt=0.01, num_trajectories=num_trajectories,
+    run_experiment(T=0.1, d=d, dt=0.01, lr=7.5e-2, num_trajectories=num_trajectories,
                    version=3, max_iter=max_iter, known_initial_value=known_initial_value)
 
     """
-    Ver 2: Data without Temporal Order
-    Solution: First sort by variance, then do an iterative scheme with 2 steps, updating SDE's
-    parameters and re-sorting data based on the current params.
+    Ver 5: Data without Temporal Order
+        A = alpha*B, G = beta*B
+        B is the adjacency matrix found by DAGMA. alpha and beta are approximated by Neural
+            Networks.
     """

@@ -6,6 +6,28 @@ import scipy
 from experiments import generate_independent_points, linear_additive_noise_data
 
 
+def warped_time(time_vector: np.ndarray, dt: float) -> np.ndarray:
+    """Generate a warped time vector based on the original time vector 
+
+    Args:
+        time_vector (np.ndarray): Array containing original (often equally-spaced) time values.
+        dt (float): Time step size (often fixed due to equally-spaced time values).
+
+    Returns:
+        np.ndarray: Warped time vector, t --> t + noise (noise ~ N(t, 0.5*dt))
+    """
+    # warped time steps
+    # t in range: [1, 2, ..., T] --> t + noise (noise ~ N(t, 0.5*dt))
+    warped_time_vector = np.zeros(time_vector.shape)
+    print(time_vector)
+    for i in range(len(warped_time_vector)):        
+        warped_time_vector[i] = np.random.normal(time_vector[i], 0.5*dt)
+    
+    print(warped_time_vector)
+
+    return warped_time_vector
+
+
 def data_masking(data: np.ndarray) -> np.ndarray:
     """Randomly mask the input data, such that for each period of time there is
     at least one trajectory with data present there.
@@ -161,46 +183,6 @@ def compute_nll(X: np.ndarray, A: np.ndarray, H: np.ndarray, dt: float) -> float
     return nll
 
 
-def compute_nlp(A: np.ndarray, H: np.ndarray, nll: float) -> float:
-    """Compute the negative log-posterior (NLP) of the current segment under the
-    current inferred model parameters. Based on Bayes's theorem, posterior is proportional
-    to likelihood*prior. Thus, minimizing NLP would be the same as minimizing -(NLL + log_prior).
-    We assume that the prior on A is Gaussian and the prior on H is improper p(H) ~ 1/H -> 
-    log p(H) = -log p(H)
-
-    Args:
-        A (np.ndarray): Estimated drift matrix, shape (d, d)
-        H (np.ndarray): Estimated (observational) diffusion matrix, shape (d, m), H = G*G.T
-        nll (float): Negative Log-likelihood.
-
-    Returns:
-        float: Total NLP of the segment
-    """
-    # Enforce positivity constraint on diagonal elements of H
-    if any(H[i, i] <= 0 for i in range(H.shape[0])):
-        return np.inf
-    
-    # --------- Log-Prior on A -----------
-    # A ~ N(0, prior_std_a^2)
-    # => log p(a) = -0.5 [ a^2 / (prior_std_a^2) + ln(2π (prior_std_a^2)) ]
-    prior_var = 10
-    log_prior_A = -0.5 * (
-        (A**2) / (prior_var) 
-        + np.log(2 * np.pi * (prior_var)))
-    
-    # --------- Log-Prior on H ---------
-    # H ~ N(0, prior_std_a^2)
-    # => log p(H) = -0.5 [ H^2 / (prior_std_H^2) + ln(2π (prior_std_H^2)) ]
-    log_prior_H = -0.5 * (
-        (H**2) / (prior_var) 
-        + np.log(2 * np.pi * (prior_var)))
-    
-    # Combine them
-    log_prior = np.sum(log_prior_A) + np.sum(log_prior_H)
-
-    return nll - log_prior
-
-
 def reorder_trajectories(
     data: np.ndarray,
     A: np.ndarray,
@@ -253,10 +235,9 @@ def reorder_trajectories(
             reordered_trajectory = np.stack(candidate_order, axis=0)
             # Evaluate the negative log-likelihood
             nll = compute_nll(reordered_trajectory, A, H, time_step_size)
-            nlp = compute_nlp(nll=nll, A=A, H=H)
             # Also compute a DAG penalty on A
             penalty = dag_penalty(A, alpha)
-            loss = nlp + penalty
+            loss = nll + penalty
 
             # quick, dirty fix
             if loss == -(np.inf):
@@ -468,11 +449,9 @@ def estimate_sde_parameters(
 
     # 2) Iterative scheme for estimating SDE parameters
     all_nlls = []
-    all_nlps = []
     all_mae_a = []
     all_mae_h = []
     best_nll = np.inf
-    best_nlp = np.inf
     best_ordered_data = np.copy(reordered_data)
     for iteration in range(max_iter):
         # Update SDE parameters A, G using MLE with the newly completed data
@@ -491,30 +470,22 @@ def estimate_sde_parameters(
                                                     num_segments*steps_per_segment, d))
 
         average_nll = 0.0
-        average_nlp = 0.0
         for traj in range(num_trajectories):
-            nll = compute_nll(reordered_data[traj], A, H, dt=time_step_size)
-            average_nll += nll
-            average_nlp += compute_nlp(nll=nll, A=A, H=H)
+            average_nll += compute_nll(reordered_data[traj], A, H, dt=time_step_size)
 
         average_nll = average_nll/num_trajectories
-        average_nlp = average_nlp/num_trajectories
         MAE_A = np.mean(np.abs(A - true_A))
         MAE_H = np.mean(np.abs(H - true_H))
-        print(f"Iteration {iteration+1}:\nNLL = {average_nll:.3f}\nNLP = {average_nlp:.3f}\nMAE to true A = {MAE_A:.3f}\nMAE to true H = {MAE_H:.3f}")
-        
+        print(f"Iteration {iteration+1}:\nNLL = {average_nll:.3f}\nMAE to true A = {MAE_A:.3f}\nMAE to true H = {MAE_H:.3f}")
+
         all_nlls.append(average_nll)
-        all_nlps.append(average_nlp)
         all_mae_a.append(MAE_A)
         all_mae_h.append(MAE_H)
-        # if average_nll < best_nll:
-        #     best_nll = average_nll
-        #     best_ordered_data = np.copy(reordered_data)
-        if average_nlp < best_nlp:
-            best_nlp = average_nlp
+        if average_nll < best_nll:
+            best_nll = average_nll
             best_ordered_data = np.copy(reordered_data)
 
-    return A, H, reordered_data, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_h
+    return A, H, reordered_data, best_ordered_data, all_nlls, all_mae_a, all_mae_h
 
 
 def run_experiment(
@@ -563,37 +534,37 @@ def run_experiment(
                            steps_per_segment, X_appex.shape[2])
     print(X_appex.shape)
 
-    # Randomize segments between each trajectory (to get rid of the temporal order between segments)
-    random_X = np.zeros((X_appex.shape))
-    for i in range(X_appex.shape[0]):
-        if known_initial_value:
-            permutation_id = np.random.permutation(np.arange(1, X_appex.shape[1]))
-            permutation_id = np.concatenate(([0], permutation_id))
-            random_X[i] = X_appex[i, permutation_id, :, :]
-        else:
-            permutation_id = np.random.permutation(X_appex.shape[1])
-            random_X[i] = X_appex[i, permutation_id, :, :]
+    # # Randomize segments between each trajectory (to get rid of the temporal order between segments)
+    # random_X = np.zeros((X_appex.shape))
+    # for i in range(X_appex.shape[0]):
+    #     if known_initial_value:
+    #         permutation_id = np.random.permutation(np.arange(1, X_appex.shape[1]))
+    #         permutation_id = np.concatenate(([0], permutation_id))
+    #         random_X[i] = X_appex[i, permutation_id, :, :]
+    #     else:
+    #         permutation_id = np.random.permutation(X_appex.shape[1])
+    #         random_X[i] = X_appex[i, permutation_id, :, :]
 
-    # Estimating SDE's parameters A, G
-    estimated_A, estimated_H, reordered_X, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_h = \
-        estimate_sde_parameters(random_X, time_step_size=0.05, T=T, max_iter=max_iter, true_A=A,
-                                true_H=G*G.T, known_initial_value=known_initial_value)
-    all_nlls = [float(item) for item in all_nlls]
-    # We'll use Cholesky if H_est is positive definite
-    # else fallback to sqrtm or pseudo-chol
-    try:
-        estimated_G = np.linalg.cholesky(estimated_H)
-    except np.linalg.LinAlgError:
-        # if not SPD, do a symmetric sqrt
-        from scipy.linalg import sqrtm
-        estimated_G = sqrtm(estimated_H)
-        # If it still fails, consider a small regularization
-    print(estimated_A, "A")
-    print(estimated_G, "G")
+    # # Estimating SDE's parameters A, G
+    # estimated_A, estimated_H, reordered_X, best_ordered_data, all_nlls, all_mae_a, all_mae_h = \
+    #     estimate_sde_parameters(random_X, time_step_size=0.05, T=T, max_iter=max_iter, true_A=A,
+    #                             true_H=G*G.T, known_initial_value=known_initial_value)
+    # all_nlls = [float(item) for item in all_nlls]
+    # # We'll use Cholesky if H_est is positive definite
+    # # else fallback to sqrtm or pseudo-chol
+    # try:
+    #     estimated_G = np.linalg.cholesky(estimated_H)
+    # except np.linalg.LinAlgError:
+    #     # if not SPD, do a symmetric sqrt
+    #     from scipy.linalg import sqrtm
+    #     estimated_G = sqrtm(estimated_H)
+    #     # If it still fails, consider a small regularization
+    # print(estimated_A, "A")
+    # print(estimated_G, "G")
 
     # Plot results
     X_appex = X_appex.reshape(X_appex.shape[0], X_appex.shape[1]*X_appex.shape[2], X_appex.shape[3])
-    random_X = random_X.reshape(random_X.shape[0], random_X.shape[1]*random_X.shape[2], random_X.shape[3])
+    # random_X = random_X.reshape(random_X.shape[0], random_X.shape[1]*random_X.shape[2], random_X.shape[3])
     num_points = X_appex.shape[1]
 
     # ---------------------------------------------------------
@@ -602,40 +573,41 @@ def run_experiment(
     fig = plt.figure(figsize=(10, 10))
     ax1 = fig.add_subplot(2, 2, 1)
     ax2 = fig.add_subplot(2, 2, 2)
-    ax3 = fig.add_subplot(2, 2, 3)
-    ax4 = fig.add_subplot(2, 2, 4)
+    # ax3 = fig.add_subplot(2, 2, 3)
+    # ax4 = fig.add_subplot(2, 2, 4)
 
-    time = np.arange(num_points)
-    num_iterations = np.arange(len(all_nlls))
+    time = np.arange(start=0, stop=T, step=dt)
+    time_warped_vector = warped_time(time, dt=dt)
+    # num_iterations = np.arange(len(all_nlls))
     for i in range(X_appex.shape[0]):
         # data[i] is shape (num_points, 2)
         # Plot one line for each trajectory
         ax1.plot(time, X_appex[i, :, 0], label=f"Trajectory {i}")
         # ax2.plot(time, best_ordered_data[i, :, 0], label=f"Trajectory {i}")
-        if i <= 9:
-            ax3.plot(time, reordered_X[i, :, 0], label=f"Trajectory {i}")
+        ax2.plot(time_warped_vector, X_appex[i, :, 0], label=f"Trajectory {i}")
+        # ax3.plot(time, reordered_X[i, :, 0], label=f"Trajectory {i}")
 
     ax1.set_xlabel('Time')
     ax1.set_ylabel('Variable 0')
     ax1.set_title("Original data")
-    # ax1.legend()
+    ax1.legend()
 
-    ax2.plot(num_iterations, all_mae_a, label=f"MAE to True A")
-    ax2.plot(num_iterations, all_mae_h, label=f"MAE to True H")
-    ax2.set_xlabel('Epoch')
-    ax2.set_ylabel('Mean Absolute Error')
-    ax2.set_title("MAE between the estimated and true params")
-    ax2.legend()
+    ax1.set_xlabel('Time')
+    ax1.set_ylabel('Variable 0')
+    ax1.set_title("Time-warped data")
+    ax1.legend()
 
-    ax3.set_xlabel('Time')
-    ax3.set_ylabel('Variable 0')
-    ax3.set_title("Reconstructed data")
-    ax3.legend()
+    # ax2.plot(num_iterations, all_mae_a, label=f"MAE to True A")
+    # ax2.plot(num_iterations, all_mae_h, label=f"MAE to True H")
+    # ax2.set_xlabel('Epoch')
+    # ax2.set_ylabel('Mean Absolute Error')
+    # ax2.set_title("MAE between the estimated and true params")
+    # ax2.legend()
 
-    ax4.plot(num_iterations, all_nlps)
-    ax4.set_xlabel('Epoch')
-    ax4.set_ylabel('Negative Log-Posterior')
-    ax4.set_title("Negative Log-Posterior through epochs")
+    # ax3.set_xlabel('Time')
+    # ax3.set_ylabel('Variable 0')
+    # ax3.set_title("Reconstructed data")
+    # # ax3.legend()
 
     # ax4.plot(num_iterations, all_nlls)
     # ax4.set_xlabel('Epoch')
@@ -651,16 +623,15 @@ def run_experiment(
 if __name__ == "__main__":
     # data generated by data_generation.py of APPEX code
     d = 3
-    num_trajectories = 1000
-    max_iter = 10
+    num_trajectories = 5
+    max_iter = 20
     known_initial_value = True
 
     # Run different experiments
     run_experiment(T=0.10, d=d, dt=0.01, num_trajectories=num_trajectories,
                    version=3, max_iter=max_iter, known_initial_value=known_initial_value)
 
-    """
-    Ver 2: Data without Temporal Order
-    Solution: First sort by variance, then do an iterative scheme with 2 steps, updating SDE's
-    parameters and re-sorting data based on the current params.
+    """ (un-implemented)
+    Ver 3: Data with noisy time-steps
+    Solution: GP Modeling with noisy inputs. More details in Problem Notes pdf file.
     """

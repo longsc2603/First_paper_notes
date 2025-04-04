@@ -130,7 +130,7 @@ def sample_X0(d, X0_dist=None):
         return np.random.multivariate_normal(np.zeros(d), cov_matrix)
 
 
-def linear_additive_noise_data(num_trajectories, d, T, dt_EM, dt, A, G, sample_X0_once=True,
+def linear_additive_noise_data(num_trajectories, d, T, dt_EM, dt, A, G, W=None, sample_X0_once=True,
                                X0_dist=None, destroyed_samples=False, shuffle=False):
     '''
     Args:
@@ -141,6 +141,8 @@ def linear_additive_noise_data(num_trajectories, d, T, dt_EM, dt, A, G, sample_X
         dt: discretization time step of the measurements
         A (numpy.ndarray): Drift matrix.
         G (numpy.ndarray): Variance matrix.
+        W (numpy.ndarray, optional): Dependence graph (parent-child relation), shape (d, d).
+            Defaults to None.
         X0_dist (list of tuples): List of tuples, each containing an initial value and its associated probability.
         destroyed_samples: if True, the trajectories will be destroyed at each time step and new ones will be generated
         shuffle: if True, shuffle observations within each time step
@@ -155,7 +157,7 @@ def linear_additive_noise_data(num_trajectories, d, T, dt_EM, dt, A, G, sample_X
     if sample_X0_once:
         X0_ = sample_X0(d, X0_dist)  # Sample X0 once for all trajectories
         for n in range(num_trajectories):
-            X_true = linear_additive_noise_trajectory(T, dt_EM, A, G, X0_)
+            X_true = linear_additive_noise_trajectory(T, dt_EM, A, G, X0_, W=W)
             for i in range(n_measured_times):
                 X_measured[n, i, :] = X_true[i * rate, :]
     else:
@@ -182,7 +184,7 @@ def linear_additive_noise_data(num_trajectories, d, T, dt_EM, dt, A, G, sample_X
     return X_measured
 
 
-def linear_additive_noise_trajectory(T, dt, A, G, X0, seed=None):
+def linear_additive_noise_trajectory(T, dt, A, G, X0, W=None, seed=None):
     """
     Simulate a single trajectory of a multidimensional linear additive noise process:
     dX_t = AX_tdt + GdW_t
@@ -191,8 +193,10 @@ def linear_additive_noise_trajectory(T, dt, A, G, X0, seed=None):
     Parameters:
         T (float): Total time period.
         dt (float): Time step size.
-        A (numpy.ndarray): Drift matrix.
-        G (numpy.ndarray): Variance matrix.
+        A (numpy.ndarray): Drift matrix, shape (d, d).
+        G (numpy.ndarray): Variance matrix, shape (d, m).
+        W (numpy.ndarray, optional): Dependence graph (parent-child relation), shape (d, d).
+            Defaults to None.
         X0 (numpy.ndarray): Initial value.
 
     Returns:
@@ -208,8 +212,8 @@ def linear_additive_noise_trajectory(T, dt, A, G, X0, seed=None):
     X[0] = X0
 
     for t in range(1, num_steps):
-        if A.shape == (1, 1):
-            X[t] = X[t - 1] + dt * (A * (X[t - 1])) + G.dot(dW[t])
+        if W is not None:
+            X[t] = X[t - 1] + dt * (np.matmul(A, W).dot(X[t - 1])) + G.dot(dW[t])
         else:
             X[t] = X[t - 1] + dt * (A.dot(X[t - 1])) + G.dot(dW[t])
 
