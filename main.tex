@@ -45,14 +45,14 @@ s224930257@deakin.edu.au\\[6pt]
 
 
 \section{Problem Setting}\label{s:1}
-In a conventional setting, we have a time-series dataset $\{\mathbf{X}^{(m)}\}_{m=1}^M$,
+In a conventional setting, we have a time-series dataset $\{\mathbf{X}^{(n)}\}_{n=1}^N$,
 \[
-\mathbf{X}^{(m)} 
+\mathbf{X}^{(n)} 
 = 
-\bigl[\mathbf{X}_{t_{1}}^{(m)}, \mathbf{X}_{t_{2}}^{(m)}, \ldots, \mathbf{X}_{t_{k}}^{(m)}\bigr],
+\bigl[\mathbf{X}_{t_{1}}^{(n)}, \mathbf{X}_{t_{2}}^{(n)}, \ldots, \mathbf{X}_{t_{k}}^{(n)}\bigr],
 \]
-where $\mathbf{X}_{t_{i}}^{(m)}$ can be vectors ($\mathbf{X}_{t_{i}}^{(m)} \in \mathbf{R}^d$) or matrices
-($\mathbf{X}_{t_{i}}^{(m)} \in \mathbf{R}^{t \times d}$), depending on the unit of time being considered
+where $\mathbf{X}_{t_{i}}^{(n)}$ can be vectors ($\mathbf{X}_{t_{i}}^{(n)} \in \mathbf{R}^d$) or matrices
+($\mathbf{X}_{t_{i}}^{(n)} \in \mathbf{R}^{t \times d}$), depending on the unit of time being considered
 here is a single time step or a segment of $t$ steps. Here we consider the latter matrix case.
 Each of these trajectories describe patient records across \(k\) time points/segments
 (e.g., patient measurements throughout \(k\) hours).
@@ -62,12 +62,17 @@ differential equation (SDE), which has the form:
 \[
 \mathrm{d}\mathbf{X}_t 
 = 
-\mathbf{A}\mathbf{X}_t\mathrm{d}t 
+\mathbf{A}\mathbf{D}\mathbf{X}_t\mathrm{d}t 
 \;+\; 
 \mathbf{G}\mathrm{d}\mathbf{W}_t,
 \]
-with unknown drift-diffusion parameters $\mathbf{A} \in \mathbf{R}^{d \times d}$ and
-$\mathbf{G} \in \mathbf{R}^{d \times m}$. $\mathbf{W}$ is an $m$-dimensional Brownian motion.
+where $\mathbf{A} \in \mathbf{R}^{d \times d}$ and $\mathbf{G} \in \mathbf{R}^{d \times m}$ are the 
+unknown drift-diffusion parameters. $\mathbf{W}$ is an $m$-dimensional Brownian motion.
+$\mathbf{D}$ is the dependence graph in cases that the system is causal, such as when dealing with
+medical/clinical data or stocks trading data.
+
+Our goal is to correctly estimate the parameters $\mathbf{A}$, $\mathbf{G}$ and the dependence graph
+$\mathbf{D}$ when given only the dataset containing temporal marginals.
 
 However, due to various practical reasons (such as data anonymization, 
 incomplete data logs, etc.), the temporal ordering
@@ -78,7 +83,7 @@ Thus, we want to find solutions for these complex real-world challenges.
 \subsection{Data without Temporal Order}
 Our first data complication is measurements taken without any temporal order. Usually,
 in a time-series dataset we would know the process states through a sequence of time steps.
-But when this "hidden" time dimension is lost, we face another challenge of sorting the data
+But when this ``hidden" time dimension is lost, we face another challenge of sorting the data
 in the correct temporal order before using it to infer the underlying SDE's parameters.
 
 \subsection{Noisy Data Measurements}
@@ -89,16 +94,12 @@ either the data values $\mathbf{X}_{t_{i}}^{(m)}$ or their corresponding time po
 $t_{i}$ are presented with independent,
 randomly distributed noise.
 
-For both these data settings, our aim is to estimate the parameters $\mathbf{A}$ and
-$\mathbf{G}$ while enforcing a Directed Acyclic Graph (DAG) constraint on the
-adjacency matrix $\mathbf{A}$ (thus avoiding ``cyclic'' order).
-
 \section{Proposed Method}\label{s:2}
 For each of the two mentioned data complications, we proposed a solution outlined as follow:
 
 \subsection{Data without Temporal Order}
-This solution consists of two parts, whereas part two is a two-step iterative scheme where
-we estimate the parameters of the SDE.
+This solution consists of two parts, whereas part one serves as a starting point for part two, which
+is a three-step iterative scheme where we estimate the parameters of the SDE.
 \subsubsection{Sorting Data by Variance}
 \begin{itemize}
   \item Empirically evaluate the variance of each observed segment of all
@@ -108,52 +109,38 @@ we estimate the parameters of the SDE.
   variance over (hidden) time. This can be done in a similar manner for converging SDEs.
 \end{itemize}
 
-\subsubsection{Iterative Two-Step Scheme} \mbox{}\\
+\subsubsection{Iterative Three-Step Scheme} \mbox{}\\
 First, we randomly initialize the parameters
-$\mathbf{A}^{(0)}$ and $\mathbf{G}^{(0)}$. Then, we follow a two-step
+$\mathbf{A}^{(0)}$ and $\mathbf{G}^{(0)}$. Then, we follow a three-step
 iterative scheme as follows:
 \begin{enumerate}
-  \item[(a)] \textbf{Update Previously-Sorted Segments} \\
-    Keeping $\mathbf{A}^{(n)}$ and $\mathbf{G}^{(n)}$ at iteration $n$ fixed, rearrange the
-    previously sorted segments for each trajectory to maximize the log-likelihood minus a
-    DAG penalty $\Omega_{\mathrm{DAG}}$:
+  \item[(a)] \textbf{Find the dependence matrix $\mathbf{D}$} \\
+    Based on Algorithm 1 from Manten et al., 2024 \cite{manten2025signaturekernelconditionalindependence}
+    or the framework Dagma of Bello et al., 2022 \cite{bello2023dagmalearningdagsmmatrices},
+    from the ordered data we can find the dependence matrix, which is a directed acyclic graph (DAG), if
+    the system is causal. This matrix works as a masking matrix when applied to the objective function as
+    shown earlier.
+  \item[(b)] \textbf{Update Previously-Sorted Segments} \\
+    Keeping $\mathbf{A}^{(n)}$, $\mathbf{G}^{(n)}$, and $\mathbf{D}^{(n)}$ at iteration $n$ fixed, rearrange the
+    previously sorted segments for each trajectory to maximize the log-likelihood:
     \[
     \{\widetilde{\mathbf{X}}^{(m)}\}
     = 
     \arg\max_{\{\widetilde{\mathbf{X}}^{(m)}\}}
     \sum_{m=1}^M
-    \ln p\bigl(\widetilde{\mathbf{X}}^{(m)} \mid \mathbf{A}^{(n)}, \mathbf{G}^{(n)}\bigr)
-    \;-\; 
-    \Omega_{\mathrm{DAG}}\bigl(\{\widetilde{\mathbf{X}}^{(m)}\}\bigr).
+    \ln p\bigl(\widetilde{\mathbf{X}}^{(m)} \mid \mathbf{A}^{(n)}, \mathbf{G}^{(n)}, \mathbf{D}^{(n)}\bigr).
     \]
-    A well-known continuous DAG-penalty comes from the NOTEARS approach by
-    Zheng et al., 2018 \cite{zheng2018dagstearscontinuousoptimization}:
-    \[
-    h(\mathbf{A})
-    = \text{trace}(e^{\mathbf{A} \circ \mathbf{A}})-d,
-    \]
-    \[
-    \Omega_{\mathrm{DAG}}\bigl(\{\widetilde{\mathbf{X}}^{(m)}\}\bigr)
-    = \alpha (h(\mathbf{A})),
-    \]
-    where $d$ is the number of variables (i.e. the size of the square matrix
-    $\mathbf{A}$) and $\alpha$ is a regularization hyper-parameter.
-    It is proved in \cite{zheng2018dagstearscontinuousoptimization} that
-    $h(\mathbf{A}) = 0$ if and only if $\mathbf{A}$,
-    our adjacency matrix, corresponds to a DAG (no directed cycles). If cycles exist,
-    $h(\mathbf{A}) > 0$. Hence, adding this term as a penalty encourages $\mathbf{A}$
-    to remain acyclic.
   \item[(b)] \textbf{Update SDE Parameters} \\
-    With the newly completed trajectories fixed, re-estimate the SDE parameters:
+    With the newly completed trajectories fixed, re-estimate the SDE parameters also
+    by maximizing the log-likelihood:
     \[
     (\mathbf{A}^{(n+1)}, \mathbf{G}^{(n+1)}) 
     = 
     \arg\max_{\mathbf{A}, \mathbf{G}}
     \sum_{m=1}^M
-    \ln p\bigl(\widetilde{\mathbf{X}}^{(m)} \mid \mathbf{A}^{(n)}, \mathbf{G}^{(n)}\bigr).
+    \ln p\bigl(\widetilde{\mathbf{X}}^{(m)} \mid \mathbf{A}^{(n)}, \mathbf{G}^{(n)}, \mathbf{D}^{(n)}\bigr).
     \]
-    This step can be done using the parameter estimation framework named APPEX introduced
-    by Guan et al., 2024 \cite{guan2024identifyingdriftdiffusioncausal}.
+    The weights are optimized using Pytorch's Adam optimizer.
   \end{enumerate}
 
 \subsection{Noisy Data Measurements}
