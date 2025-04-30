@@ -211,11 +211,11 @@ def linear_additive_noise_trajectory(T, dt, A, G, X0, W=None, seed=None):
     X = np.zeros((num_steps, d))
     X[0] = X0
 
+    if W is not None:
+        A = A * W
+
     for t in range(1, num_steps):
-        if W is not None:
-            X[t] = X[t - 1] + dt * (np.matmul(A, W).dot(X[t - 1])) + G.dot(dW[t])
-        else:
-            X[t] = X[t - 1] + dt * (A.dot(X[t - 1])) + G.dot(dW[t])
+        X[t] = X[t - 1] + dt * (A.dot(X[t - 1])) + G.dot(dW[t])
 
     return X
 

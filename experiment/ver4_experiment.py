@@ -144,7 +144,7 @@ def compute_nll(X: np.ndarray, A: np.ndarray, G: np.ndarray, dt: float) -> float
         # this is the case of shape (num_segments, steps_per_segment, d)
         X = torch.reshape(X, (X.shape[0]*X.shape[1], X.shape[2]))
     num_steps, d = X.shape
-    H_dt = G*G.T*dt
+    H_dt = G@G.T*dt
     H_dt_inv = G/dt # (H*dt)^-1 = dt^-1 * H^-1
     # quick fix, instead of getting logdet of H_dt, which
     # is -inf due to det(H_dt) = 0, we get logdet of H_dt + eps*I
@@ -179,7 +179,7 @@ def compute_nlp(A: np.ndarray, H: np.ndarray, nll: float) -> float:
 
     Args:
         A (np.ndarray): Estimated drift matrix, shape (d, d)
-        H (np.ndarray): Estimated (observational) diffusion matrix, shape (d, m), H = G*G.T
+        H (np.ndarray): Estimated (observational) diffusion matrix, shape (d, m), H = G@G.T
         nll (float): Negative Log-likelihood.
 
     Returns:
@@ -275,7 +275,7 @@ def reorder_trajectories(
             best_orderings = dict(sorted(best_orderings.items(), key=lambda x:x[0])) # sort by key
             if len(best_orderings) > num_orderings_kept:
                 best_orderings.popitem()
-
+        # print([item.item() for item in list(best_orderings.keys())])
         # Update the current trajectory randomly to one of the best trajectories just found
         probabilities = list(best_orderings.keys())
         probabilities = [torch.clone(item).detach().numpy() for item in probabilities]
@@ -321,7 +321,7 @@ class DiffusionNetwork(nn.Module):
 
 def estimate_sde_parameters(
     data: np.ndarray,
-    drift_net, diff_net,
+    drift_net, diff_net, original_data,
     time_step_size: float,
     T: float,
     true_A: np.ndarray,
@@ -367,29 +367,39 @@ def estimate_sde_parameters(
     # re-ordered again.
     num_segments = reordered_data.shape[1]
     steps_per_segment = reordered_data.shape[2]
-    reordered_data = torch.Tensor(reordered_data)
+    reordered_data = torch.tensor(reordered_data)
     reordered_data = torch.reshape(reordered_data, (num_trajectories,
                                                  num_segments*steps_per_segment, d))
+
+    right_percent_through_traj = []
+    for traj in range(num_trajectories):
+        right_value = ((original_data[traj] - reordered_data[traj].detach().numpy()) == 0.0).astype(int)
+        right_value_count = (right_value == 1).sum()
+        right_value_count /= original_data[traj].shape[0]*original_data[traj].shape[1]
+        right_percent_through_traj.append(right_value_count)
+    right_percent = np.mean(right_percent_through_traj)
+    print(right_percent)
 
     # 2) Iterative scheme for estimating SDE parameters
     all_nlls = []
     all_nlps = []
     all_mae_a = []
     all_mae_g = []
+    all_right_percent = []
     best_nll = np.inf
     best_nlp = np.inf
     best_ordered_data = torch.clone(reordered_data)
+    A = drift_net().double()
+    G = diff_net().double()
     for iteration in range(max_iter):
         # Update SDE parameters A, G using MLE with the newly completed data
         optimizer.zero_grad()
         average_nll = 0.0
         average_nlp = 0.0
         for traj in range(num_trajectories):
-            A = drift_net()
-            G = diff_net()
             nll = compute_nll(reordered_data[traj], A, G, dt=time_step_size)
             average_nll += nll
-            # average_nlp += compute_nlp(nll=nll, A=A, H=G*G.T)
+            # average_nlp += compute_nlp(nll=nll, A=A, H=G@G.T)
 
         average_nll = average_nll/num_trajectories
         # average_nlp = average_nlp/num_trajectories
@@ -425,14 +435,23 @@ def estimate_sde_parameters(
                                     (num_trajectories, num_segments,
                                     steps_per_segment, d))
         # Reconstruct / reorder segments to maximize LL - DAG penalty
-        reordered_data = reorder_trajectories(reordered_data, A, G*G.T, time_step_size, alpha,
+        reordered_data = reorder_trajectories(reordered_data, A, G, time_step_size, alpha,
                                               known_initial_value=known_initial_value)
 
         # Transform the data back to its previous shape
         reordered_data = torch.reshape(reordered_data, (num_trajectories,
                                                     num_segments*steps_per_segment, d))
 
-    return A, G, reordered_data, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_g
+        right_percent_through_traj = []
+        for traj in range(num_trajectories):
+            right_value = ((original_data[traj] - reordered_data[traj].detach().numpy()) == 0.0).astype(int)
+            right_value_count = (right_value == 1).sum()
+            right_value_count /= original_data[traj].shape[0]*original_data[traj].shape[1]
+            right_percent_through_traj.append(right_value_count)
+        right_percent = np.mean(right_percent_through_traj)
+        all_right_percent.append(right_percent)
+
+    return A, G, reordered_data, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_g, all_right_percent
 
 
 def run_experiment(
@@ -466,8 +485,8 @@ def run_experiment(
         # our_data = data_masking(our_data)
         pass
     elif version == 3:
-        A = np.ones((d, d)) * 5
-        G = np.ones((d, d)) * 2.5
+        A = np.ones((d, d)) * 15
+        G = np.ones((d, d)) * 7.5
     
     # Generating data
     points = generate_independent_points(d, d)
@@ -495,9 +514,19 @@ def run_experiment(
             permutation_id = np.random.permutation(X_appex.shape[1])
             random_X[i] = X_appex[i, permutation_id, :, :]
 
+    right_percent_through_traj = []
+    for traj in range(num_trajectories):
+        right_value = ((X_appex[traj] - random_X[traj]) == 0.0).astype(int)
+        right_value_count = (right_value == 1).sum()
+        right_value_count /= X_appex[traj].shape[0]*X_appex[traj].shape[1]*X_appex[traj].shape[2]
+        right_percent_through_traj.append(right_value_count)
+    right_percent = np.mean(right_percent_through_traj)
+    print(right_percent)
+    
     # Estimating SDE's parameters A, G
-    estimated_A, estimated_G, reordered_X, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_g = \
-        estimate_sde_parameters(random_X, drift_net, diff_net, time_step_size=0.05, T=T,
+    X_appex = X_appex.reshape(X_appex.shape[0], X_appex.shape[1]*X_appex.shape[2], X_appex.shape[3])
+    estimated_A, estimated_G, reordered_X, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_g, all_right_percent = \
+        estimate_sde_parameters(random_X, drift_net, diff_net, X_appex, time_step_size=0.05, T=T,
                                 max_iter=max_iter, true_A=A, true_G=G,
                                 lr=lr, known_initial_value=known_initial_value)
     all_nlls = [float(item) for item in all_nlls]
@@ -506,7 +535,6 @@ def run_experiment(
     print(estimated_G, "G")
 
     # Plot results
-    X_appex = X_appex.reshape(X_appex.shape[0], X_appex.shape[1]*X_appex.shape[2], X_appex.shape[3])
     random_X = random_X.reshape(random_X.shape[0], random_X.shape[1]*random_X.shape[2], random_X.shape[3])
     num_points = X_appex.shape[1]
 
@@ -572,17 +600,24 @@ def run_experiment(
     ax4.set_xlabel('Epoch')
     ax4.set_ylabel('Negative Log-likelihood')
     ax4.set_title("Negative Log-likelihood through epochs")
-
+    
     plt.show()
+
+    fig = plt.figure(figsize=(5, 5))
+    ax = fig.add_subplot()
+    ax.plot(num_iterations, all_right_percent)
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('MAE')
+    ax.set_title("MAE between the original and reordered data")
 
     return
 
 
 if __name__ == "__main__":
     # data generated by data_generation.py of APPEX code
-    d = 3
-    num_trajectories = 3000
-    max_iter = 10
+    d = 2
+    num_trajectories = 500
+    max_iter = 5
     known_initial_value = True
 
     # Run different experiments

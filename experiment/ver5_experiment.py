@@ -8,14 +8,21 @@ import torch.optim as optim
 import torch.nn.functional as F
 import math
 
+# Ignore Deprecated Warnings
+import warnings
+warnings.filterwarnings("ignore")
+
 from dagma import utils
 from dagma.linear import DagmaLinear
 from dagma.nonlinear import DagmaMLP, DagmaNonlinear
 
-import causally.scm.scm as scm
-import causally.graph.random_graph as rg
-import causally.scm.noise as noise
-import causally.scm.causal_mechanism as cm
+# import causally.scm.scm as scm
+# import causally.graph.random_graph as rg
+# import causally.scm.noise as noise
+# import causally.scm.causal_mechanism as cm
+
+from sklearn.kernel_ridge import KernelRidge
+from hyppo.independence import Hsic
 
 from experiments import generate_independent_points, linear_additive_noise_data
 
@@ -153,7 +160,7 @@ def compute_nll(X: np.ndarray, A: np.ndarray, G: np.ndarray, dt: float) -> float
         # this is the case of shape (num_segments, steps_per_segment, d)
         X = torch.reshape(X, (X.shape[0]*X.shape[1], X.shape[2]))
     num_steps, d = X.shape
-    H_dt = G*G.T*dt
+    H_dt = G@G.T*dt
     H_dt_inv = G/dt # (H*dt)^-1 = dt^-1 * H^-1
     # quick fix, instead of getting logdet of H_dt, which
     # is -inf due to det(H_dt) = 0, we get logdet of H_dt + eps*I
@@ -162,13 +169,10 @@ def compute_nll(X: np.ndarray, A: np.ndarray, G: np.ndarray, dt: float) -> float
     H_dt_reg = H_dt + eps*torch.eye(H_dt.shape[0])
     # Precompute determinant of H_dt
     sign, logdet_H_dt = torch.linalg.slogdet(H_dt_reg)
-    logdet_G_dt = 2*torch.log(torch.linalg.det(G + torch.eye(G.shape[0]))) + np.log(np.pow(dt, d))
+    # logdet_G_dt = 2*torch.log(torch.linalg.det(G + eps*torch.eye(G.shape[0]))) + np.log(np.pow(dt, d))
     # logdet_G_dt = 2*torch.log(torch.linalg.det(G)) + np.log(np.pow(dt, d))
     const_term = 0.5 * (d * np.log(2 * np.pi) + logdet_H_dt)
-    const_term_G = 0.5 * (d * np.log(2 * np.pi) + logdet_G_dt)
-    if math.isnan(const_term_G.item()):
-        print(G, 'G')
-        print(logdet_G_dt, 'logdet_G')
+    # const_term_G = 0.5 * (d * np.log(2 * np.pi) + logdet_G_dt)
     for t in range(num_steps - 1):
         X_t = X[t]
         X_tp1 = X[t + 1]
@@ -177,7 +181,7 @@ def compute_nll(X: np.ndarray, A: np.ndarray, G: np.ndarray, dt: float) -> float
         mu_t = X_t + A @ X_t * dt  # Using Euler-Maruyama approximation
         diff = X_tp1 - mu_t
         exponent = 0.5 * diff.T @ H_dt_inv @ diff
-        nll += exponent + const_term_G
+        nll += exponent + const_term
     
     return nll
 
@@ -331,9 +335,110 @@ class DiffusionNetwork(nn.Module):
         return self.G
 
 
+def residualize(target, predictor, alpha=1e-3, kernel='rbf', gamma=None):
+    """
+    Remove the effect of predictor from target via kernel ridge regression.
+    
+    Parameters:
+    target: array of shape (n_samples, d_target)
+    predictor: array of shape (n_samples, d_predictor)
+    alpha: regularization parameter
+    kernel: kernel type (default 'rbf')
+    gamma: kernel coefficient (if None, scikit-learn will use its default)
+    
+    Returns:
+    residuals: target minus its prediction based on predictor.
+    """
+    model = KernelRidge(alpha=alpha, kernel=kernel, gamma=gamma)
+    model.fit(predictor, target)
+    predictions = model.predict(predictor)
+
+    residuals = np.subtract(target, predictions)
+    
+    return residuals
+
+
+def is_ci(X: torch.Tensor, Y: torch.Tensor, Z: torch.Tensor) -> bool:
+    """Check for conditional independence between two variables given other variable(s).
+
+    Args:
+        X (torch.Tensor): X_i to be checked for independence,
+            shape (num_samples, num_time_steps, 1)
+        Y (torch.Tensor): X_j to be checked for independence,
+            shape (num_samples, num_time_steps, 1)
+        Z (torch.Tensor): X_k to be used as conditional data,
+            shape (num_samples, num_time_steps, d)
+
+    Returns:
+        bool: True if X and Y are conditionally independent, False otherwise.
+    """
+    num_samples, num_time_steps = X.shape[:2]
+    X_new = X.view(num_samples, num_time_steps)
+    Y_new = Y.view(num_samples, num_time_steps)
+    Z_new = torch.reshape(Z, (num_samples, num_time_steps*Z.shape[-1]))
+    # Residualize X and Y with respect to Z.
+    X_res = residualize(X_new, Z_new)
+    Y_res = residualize(Y_new, Z_new)
+
+    # Use hyppo's Hsic test on the residuals.
+    statistic, p_value = Hsic().test(X_res.numpy(), Y_res.numpy())
+
+    # print("Hsic Statistic on residuals:", statistic)
+    # print("p-value on residuals:", p_value)
+
+    if p_value < 0.05:
+        is_independent = False
+    else:
+        is_independent = True
+
+    return is_independent
+
+
+def discover_dag(data: torch.Tensor, only_cpdag: bool=True) -> torch.Tensor:
+    """Discover the full DAG (or an equivalent CPDAG) from the data.
+
+    Args:
+        data (torch.Tensor): Input data, shape (num_samples, num_time_steps, d)
+        only_cpdag (bool, optional): If True, use another independence test to extract 
+            CPDAG only. Defaults to True.
+
+    Returns:
+        torch.Tensor: The full DAG or equivalent CPDAG, shape (d, d)
+    """
+    num_samples, num_time_steps, d = data.shape
+    # # For extracting DAG directly:
+    # # split the nodes into two copies "past" and "future"
+    # # with intervals [0, s] and [s, s+h]
+    # s = int(num_time_steps/2)
+    # h = num_time_steps - s
+    dependence_graph = np.ones((d, d))
+
+    for subset_length in range(1, d-1):
+        for i in range(d-1):
+            for j in range(i+1, d):
+                # exclude the two dims i and j, loop through each subset of the leftover dims
+                # to use as conditional data
+                temp = torch.arange(0, d)
+                dim_not_dropped = torch.cat([temp[:i], temp[i+1:]])
+                dim_not_dropped = torch.cat([dim_not_dropped[:j], dim_not_dropped[j+1:]])
+                # conditional_data shape (num_samples, num_time_steps, d-2), exclude i and j
+                conditional_data = torch.index_select(data, 2, dim_not_dropped)
+                for start in range(d-2-subset_length):
+                    X_K = conditional_data[:, :, start:start+subset_length]
+                    if is_ci(X=data[:, :, i], Y=data[:, :, j], Z=X_K):
+                        # X_i and X_j are symmetrically conditional independent
+                        print("Yes")
+                        dependence_graph[i][j] = 0
+                        dependence_graph[j][i] = 0
+                        break
+
+    return dependence_graph
+
+
 def estimate_sde_parameters(
     data: np.ndarray,
     drift_net, diff_net,
+    dag_model, original_data,
     time_step_size: float,
     T: float,
     true_A: np.ndarray,
@@ -388,17 +493,26 @@ def estimate_sde_parameters(
     all_nlps = []
     all_mae_a = []
     all_mae_g = []
+    all_mae_order = []
     best_nll = np.inf
     best_nlp = np.inf
     best_ordered_data = torch.clone(reordered_data)
     for iteration in range(max_iter):
+        # Find the dependence graph D
+        np_data = torch.reshape(reordered_data, (-1, d)).detach().cpu().numpy()
+        D = dag_model.fit(np_data, lambda1=0.02)
+        np.fill_diagonal(D, 1)
+        D = (D > 0).astype(int)
+        D = torch.tensor(D)
+
         # Update SDE parameters A, G using MLE with the newly completed data
         optimizer.zero_grad()
         average_nll = 0.0
         average_nlp = 0.0
+        A = drift_net()
+        G = diff_net()
+        A = (A * D).float()   # D - dependence graph - masking matrix
         for traj in range(num_trajectories):
-            A = drift_net()
-            G = diff_net()
             nll = compute_nll(reordered_data[traj], A, G, dt=time_step_size)
             average_nll += nll
             # average_nlp += compute_nlp(nll=nll, A=A, H=G*G.T)
@@ -437,14 +551,17 @@ def estimate_sde_parameters(
                                     (num_trajectories, num_segments,
                                     steps_per_segment, d))
         # Reconstruct / reorder segments to maximize LL - DAG penalty
-        reordered_data = reorder_trajectories(reordered_data, A, G*G.T, time_step_size, alpha,
+        reordered_data = reorder_trajectories(reordered_data, (A*D).float(), G@G.T, time_step_size, alpha,
                                               known_initial_value=known_initial_value)
 
         # Transform the data back to its previous shape
         reordered_data = torch.reshape(reordered_data, (num_trajectories,
                                                     num_segments*steps_per_segment, d))
+        
+        mae_order = np.mean(np.abs(original_data - reordered_data.detach().cpu().numpy()))*num_trajectories
+        all_mae_order.append(mae_order)
 
-    return A, G, reordered_data, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_g
+    return A, G, reordered_data, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_g, all_mae_order
 
 
 def run_experiment(
@@ -487,16 +604,19 @@ def run_experiment(
     utils.set_random_seed(1)
     # Create an Erdos-Renyi DAG of 20 nodes and 20 edges in expectation with Gaussian noise
     # number of samples n = 500
-    n, d, s0 = 500, 20, 20
+    n, s0 = 500, d
     graph_type, sem_type = 'ER', 'gauss'
 
     B_true = utils.simulate_dag(d, s0, graph_type)
+    np.fill_diagonal(B_true, val=1)
+    print(B_true)
     W_true = utils.simulate_parameter(B_true)
     # X = utils.simulate_linear_sem(W_true, n, sem_type)
     # print(W_true)
 
     # A = W_true
-    # # print(A, "A")
+    # print(A, "A")
+    # print(G, "G")
     # G = np.ones((d, d))
 
     # Generating data by APPEX
@@ -504,8 +624,10 @@ def run_experiment(
     X0_dist = [(point, 1 / len(points)) for point in points]
     X_appex = linear_additive_noise_data(
         num_trajectories=num_trajectories, d=d, T=T, dt_EM=dt, dt=dt,
-        A=A, G=G, sample_X0_once=True, X0_dist=X0_dist)
+        A=A, G=G, W=B_true, sample_X0_once=True, X0_dist=X0_dist)
     print(X_appex.shape)
+    # D = discover_dag(torch.from_numpy(X_appex))
+    # print(D)
 
     # # causally package
     # # Erdos-Renyi graph generator
@@ -528,10 +650,10 @@ def run_experiment(
     # dataset, groundtruth = model.sample()
     # print(groundtruth.shape)
 
-    model = DagmaLinear(loss_type='l2') # create a linear model with least squares loss
-    W_est = model.fit(np.reshape(X_appex[:, 5, :], (500, 20)), lambda1=0.02) # fit the model with L1 reg. (coeff. 0.02)
-    # W_est = model.fit(dataset, lambda1=0.02) # fit the model with L1 reg. (coeff. 0.02)
-    print(W_est.shape, "W_est")
+    dag_model = DagmaLinear(loss_type='l2') # create a linear model with least squares loss
+    # W_est = dag_model.fit(np.reshape(X_appex, (-1, d)), lambda1=0.02) # fit the model with L1 reg. (coeff. 0.02)
+    # # W_est = dag_model.fit(dataset, lambda1=0.02) # fit the model with L1 reg. (coeff. 0.02)
+    # print(W_est, "W_est")
     
     # Reshape data from shape (num_trajectories, num_steps, d)
     # to shape (num_trajectories, num_segment, steps_per_segment, d)
@@ -552,8 +674,9 @@ def run_experiment(
             random_X[i] = X_appex[i, permutation_id, :, :]
 
     # Estimating SDE's parameters A, G
-    estimated_A, estimated_G, reordered_X, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_g = \
-        estimate_sde_parameters(random_X, drift_net, diff_net, time_step_size=0.05, T=T,
+    X_appex = X_appex.reshape(X_appex.shape[0], X_appex.shape[1]*X_appex.shape[2], X_appex.shape[3])
+    estimated_A, estimated_G, reordered_X, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_g, all_mae_order = \
+        estimate_sde_parameters(random_X, drift_net, diff_net, dag_model, X_appex, time_step_size=0.05, T=T,
                                 max_iter=max_iter, true_A=A, true_G=G,
                                 lr=lr, known_initial_value=known_initial_value)
     all_nlls = [float(item) for item in all_nlls]
@@ -562,7 +685,6 @@ def run_experiment(
     print(estimated_G, "G")
 
     # Plot results
-    X_appex = X_appex.reshape(X_appex.shape[0], X_appex.shape[1]*X_appex.shape[2], X_appex.shape[3])
     random_X = random_X.reshape(random_X.shape[0], random_X.shape[1]*random_X.shape[2], random_X.shape[3])
     num_points = X_appex.shape[1]
 
@@ -631,12 +753,19 @@ def run_experiment(
 
     plt.show()
 
+    fig = plt.figure(figsize=(5, 5))
+    ax = fig.add_subplot()
+    ax.plot(num_iterations, all_mae_order[-1::-1])
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('MAE')
+    ax.set_title("MAE between the original and reordered data")
+
     return
 
 
 if __name__ == "__main__":
     # data generated by data_generation.py of APPEX code
-    d = 20
+    d = 5
     num_trajectories = 500
     max_iter = 10
     known_initial_value = True
