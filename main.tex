@@ -62,143 +62,85 @@ differential equation (SDE), which has the form:
 \[
 \mathrm{d}\mathbf{X}_t 
 = 
-\mathbf{A}\mathbf{D}\mathbf{X}_t\mathrm{d}t 
+\mathbf{A}\mathbf{X}_t\mathrm{d}t 
 \;+\; 
 \mathbf{G}\mathrm{d}\mathbf{W}_t,
 \]
 where $\mathbf{A} \in \mathbf{R}^{d \times d}$ and $\mathbf{G} \in \mathbf{R}^{d \times m}$ are the 
 unknown drift-diffusion parameters. $\mathbf{W}$ is an $m$-dimensional Brownian motion.
-$\mathbf{D}$ is the dependence graph in cases that the system is causal, such as when dealing with
-medical/clinical data or stocks trading data.
-
-Our goal is to correctly estimate the parameters $\mathbf{A}$, $\mathbf{G}$ and the dependence graph
-$\mathbf{D}$ when given only the dataset containing temporal marginals.
 
 However, due to various practical reasons (such as data anonymization, 
 incomplete data logs, etc.), the temporal ordering
-(i.e. the time dimension) might be lost or the time values 
-at which measurements are taken might be noisy (measurement errors).
-Thus, we want to find solutions for these complex real-world challenges.
+(i.e. the time dimension) might be lost. Usually, in a time-series dataset we
+would know the process states through a sequence of time steps. But when this ``hidden" time
+dimension is lost, we face another challenge of sorting the data in the correct temporal order
+before using it to infer the underlying SDE's parameters.
 
-\subsection{Data without Temporal Order}
-Our first data complication is measurements taken without any temporal order. Usually,
-in a time-series dataset we would know the process states through a sequence of time steps.
-But when this ``hidden" time dimension is lost, we face another challenge of sorting the data
-in the correct temporal order before using it to infer the underlying SDE's parameters.
+Our goal is to correctly estimate the parameters $\mathbf{A}$ (drift), and
+$\mathbf{H} = \mathbf{GG}^{\text{T}}$ (observational diffusion) when given only the
+observational data. Furthermore, building on the recent identifiability theory of Wang et al., 2023
+\cite{NEURIPS2023_ca642f8e}, who show that for linear SDEs driven by additive Brownian noise the
+infinitesimal generator are generically identifiable from i.i.d. trajectories, provided
+a simple full-rank moment condition:
+\begin{equation}
+\text{rank}\bigl[x_0, \mathbf{A}x_0, ..., \mathbf{A}^{d-1}x_0,
+\mathbf{GG}^T, \mathbf{AGG}^T, ..., \mathbf{A}^{d-1}\mathbf{GG}^T
+\bigr] = d
+\end{equation}\label{first_eqt}
+is satisfied.
 
-\subsection{Noisy Data Measurements}
-Other than missing temporal order completely, another complication that can happen to
-our data is noisy measurements, whereas our data is either measured incorrectly,
-or the time at which measurements are taken are logged incorrectly. In other words,
-either the data values $\mathbf{X}_{t_{i}}^{(m)}$ or their corresponding time points
-$t_{i}$ are presented with independent,
-randomly distributed noise.
+Their result guarantees that, once the condition is met, every post-intervention distribution in the
+sense of stochastic structural causal models is determined by the observational data.
 
 \section{Proposed Method}\label{s:2}
-For each of the two mentioned data complications, we proposed a solution outlined as follow:
+We propose our base method with an extension based on Wang et al., \cite{NEURIPS2023_ca642f8e}.
 
-\subsection{Data without Temporal Order}
-This solution consists of two parts, whereas part one serves as a starting point for part two, which
-is a three-step iterative scheme where we estimate the parameters of the SDE.
-\subsubsection{Sorting Data by Variance}
-\begin{itemize}
-  \item Empirically evaluate the variance of each observed segment of all
-  our trajectories.
-  \item Sort segments in ascending order of variance, with the assumption that we
-  are dealing with a diverging SDE and that a diverging SDE usually has increasing
-  variance over (hidden) time. This can be done in a similar manner for converging SDEs.
-\end{itemize}
-
-\subsubsection{Iterative Three-Step Scheme} \mbox{}\\
+\subsection{Iterative Two-Step Scheme} \mbox{}\\
 First, we randomly initialize the parameters
-$\mathbf{A}^{(0)}$ and $\mathbf{G}^{(0)}$. Then, we follow a three-step
+$\mathbf{A}^{(0)}$ and $\mathbf{H}^{(0)} (= \mathbf{GG}^{\text{T}})$. Then, we follow a two-step
 iterative scheme as follows:
 \begin{enumerate}
-  \item[(a)] \textbf{Find the dependence matrix $\mathbf{D}$} \\
-    Based on Algorithm 1 from Manten et al., 2024 \cite{manten2025signaturekernelconditionalindependence}
-    or the framework Dagma of Bello et al., 2022 \cite{bello2023dagmalearningdagsmmatrices},
-    from the ordered data we can find the dependence matrix, which is a directed acyclic graph (DAG), if
-    the system is causal. This matrix works as a masking matrix when applied to the objective function as
-    shown earlier.
-  \item[(b)] \textbf{Update Previously-Sorted Segments} \\
-    Keeping $\mathbf{A}^{(n)}$, $\mathbf{G}^{(n)}$, and $\mathbf{D}^{(n)}$ at iteration $n$ fixed, rearrange the
+  \item[(a)] \textbf{Update Previously-Sorted Segments} \\
+    Keeping $\mathbf{A}^{(n)}$, and $\mathbf{H}^{(n)}$ at iteration $n$ fixed, rearrange the
     previously sorted segments for each trajectory to maximize the log-likelihood:
     \[
     \{\widetilde{\mathbf{X}}^{(m)}\}
     = 
     \arg\max_{\{\widetilde{\mathbf{X}}^{(m)}\}}
     \sum_{m=1}^M
-    \ln p\bigl(\widetilde{\mathbf{X}}^{(m)} \mid \mathbf{A}^{(n)}, \mathbf{G}^{(n)}, \mathbf{D}^{(n)}\bigr).
+    \ln p\bigl(\widetilde{\mathbf{X}}^{(m)} \mid \mathbf{A}^{(n)}, \mathbf{H}^{(n)}\bigr).
     \]
   \item[(b)] \textbf{Update SDE Parameters} \\
-    With the newly completed trajectories fixed, re-estimate the SDE parameters also
-    by maximizing the log-likelihood:
+    With the newly completed trajectories fixed, we can update the SDE parameters also by maximum likelihood estimation:
     \[
-    (\mathbf{A}^{(n+1)}, \mathbf{G}^{(n+1)}) 
+    \mathbf{A}^{(k)}
     = 
-    \arg\max_{\mathbf{A}, \mathbf{G}}
-    \sum_{m=1}^M
-    \ln p\bigl(\widetilde{\mathbf{X}}^{(m)} \mid \mathbf{A}^{(n)}, \mathbf{G}^{(n)}, \mathbf{D}^{(n)}\bigr).
+    \frac{1}{\Delta t}
+    \Bigl(\sum_{i, j}(\Delta\mathbf{X}_i^{(j)})\mathbf{X}_i^{(j)\text{T}}\Bigr)
+    \Bigl(\sum_{i, j}\mathbf{X}_i^{(j)}\mathbf{X}_i^{(j)\text{T}}\Bigr)^{-1},
     \]
-    The weights are optimized using Pytorch's Adam optimizer.
+    \[
+    \mathbf{H}^{(k)} 
+    = 
+    \frac{1}{T}
+    \sum_{i, j}
+    \bigl(\Delta\mathbf{X}_i^{(j)} - \mathbf{A}^{(k)}\mathbf{X}_i^{(j)}\Delta t\bigr)
+    \bigl(\Delta\mathbf{X}_i^{(j)} - \mathbf{A}^{(k)}\mathbf{X}_i^{(j)}\Delta t\bigr)^{\text{T}},
+    \]
+    where $T = (N - 1)\Delta t$ is the total time and 
+    $\Delta\mathbf{X}_i^{(j)} = \mathbf{X}_{i+1}^{(j)} - \mathbf{X}_i^{(j)}$.
   \end{enumerate}
 
-\subsection{Noisy Data Measurements}
-Based on the theory of Gaussian Process and the work of Mchutchon et al. \cite{NIPS2011_a8e864d0},
-we propose using the noisy input data/time steps to directly learn the underlying SDE's parameters.
-
-\subsubsection{Using a Gaussian Process Surrogate for the Drift}
-We want to estimate the drift function $f(x)$ of the SDE (in this case the matrix $\mathbf{A}$).
-But because we only observe noisy inputs $Y_t = X_t + \epsilon_t$ with $\epsilon_t \sim \mathcal{N}(0, \Sigma_x)$,
-fitting a standard GP to the pairs $(Y_t, Y'_t)$ would lead to biased estimates due to the input
-noise. This uncertainty in $Y_t$ affects the estimate of $f(x)$ non-uniformly — especially in regions
-where $f(x)$ changes rapidly.
-
-To account for this, we:
-\begin{itemize}
-  \item Treat the Euler–Maruyama-discretized form as a supervised learning problem, whereas:
-        \[
-          Y_{t+1} \approx Y_t + AY_tdt + \text{noise}
-        \]
-  \item Fit a GP to the pairs $\{(Y_t, Y_{t+1})\}$. This GP will provide a posterior mean function
-        $\bar{f}(x) \approx \mathbf{A}x$, which allows us to compute the gradient $\nabla \bar{f}(x)$
-        analytically. Note that in GPs, derivatives are also GPs and easy to compute.
-\end{itemize}
-
-\subsubsection{Applying Noisy-Input GP (NIGP) Correction}
-NIGP use the first-order Taylor expansion of $f(x + \epsilon_x)$ around the mean input $x$:
+\subsection{Extension to Generator Identification} \mbox{}\\
+After we arrive at our estimated parameters, we can use the test (\ref{first_eqt}) to check for generator identifiability.
+Namely, we test if:
 \[
-  f(x + \epsilon_x) \approx f(x) + \nabla\bar{f}(x)^T \epsilon_x
+\text{rank}\bigl[\hat{x}_0, \hat{\mathbf{A}}\hat{x}_0, ..., \hat{\mathbf{A}}^{d-1}\hat{x}_0,
+\widehat{\mathbf{GG}^T}, \hat{\mathbf{A}}\widehat{\mathbf{GG}^T}, ..., \hat{\mathbf{A}}^{d-1}\widehat{\mathbf{GG}^T}
+\bigr] = d
 \]
-Then, the variance in the output due to input noise is approximately:
-\[
-  \text{Var}[x + \epsilon_x] \approx \nabla\bar{f}(x)^T \Sigma_x \nabla\bar{f}(x) \approx \nabla\bar{f}(y)^T \Sigma_x \nabla\bar{f}(y)
-\]
-Thus, the GP posterior is corrected with this heteroscedastic variance term instead of assuming
-constant noise variance $\Sigma_y$:
-\[
-  \text{Var}(y) = \Sigma_y + \nabla\bar{f}(y)^T \Sigma_x \nabla\bar{f}(y)
-\]
-This gives us a modified GP model that model input noise as heteroscedastic output noise — larger
-variance in high-gradient regions, tighter confidence in flatter regions.
-
-\subsubsection{Constructing Marginal Likelihood}
-The negative log likelihood (NLL) of the dataset under the GP with this structured noise becomes:
-\[
-  \text{log}p(Y_{t+1}|Y_t) = \frac{1}{2}\sum_{t} [(Y_{t+1}-\phi Y_t)^T(\Sigma_y+\phi^T\Sigma_x\phi)^{-1}(Y_{t+1}-\phi Y_t)+\text{log}|\Sigma_y+\phi^T\Sigma_x\phi|],
-\]
-where $\Sigma_x$ is the input noise covariance to be inferred. Maximizing the above NLL with respect to:
-\begin{itemize}
-  \item $\phi = I + Adt$ gives $\mathbf{A}$
-  \item $\Sigma_y = GG^Tdt$ gives $\mathbf{G}$
-\end{itemize}
-Our iterative procedure should be:
-\begin{enumerate}
-  \item Initialize $\mathbf{A}, \mathbf{A}, \Sigma_x$
-  \item Use GP with the input-dependent noise $\text{Var}(Y)$ above
-  \item Minimize the NLL with respect to parameters via gradients (using L-BFGS, Adam, ...)
-  \item Re-estimate gradients based on updated GP predictions and iterate
-\end{enumerate}
+If our estimated params and re-ordered data pass this test, we can leverage the results in \cite{NEURIPS2023_ca642f8e} to
+move forward with the SDE's generator ddentification.
 \section{Notes}\label{s:3}
 Some notes to keep in mind:
 \begin{itemize}
