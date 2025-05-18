@@ -1,0 +1,340 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+% The preceding line is only needed to identify funding in the first footnote. If that is unneeded, please comment it out.
+%Template version as of 6/27/2024
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{algorithm,algorithmic}
+\usepackage[hidelinks]{hyperref}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\begin{document}
+
+\title{Conference Paper Title*\\
+{\footnotesize \textsuperscript{*}Note: Sub-titles are not captured for https://ieeexplore.ieee.org  and
+should not be used}
+\thanks{Identify applicable funding agency here. If none, delete this.}
+}
+
+\author{\IEEEauthorblockN{Long Tran}
+\IEEEauthorblockA{\textit{Applied Artificial Intelligence Institute} \\
+\textit{Deakin University}\\
+Geelong, Australia \\
+s224930257@deakin.edu.au}
+\and
+\IEEEauthorblockN{Truyen Tran}
+\IEEEauthorblockA{\textit{Applied Artificial Intelligence Institute} \\
+\textit{Deakin University}\\
+Geelong, Australia \\
+truyen.tran@deakin.edu.au}
+\and
+\IEEEauthorblockN{Phuoc Nguyen}
+\IEEEauthorblockA{\textit{Applied Artificial Intelligence Institute} \\
+\textit{Deakin University}\\
+Geelong, Australia \\
+phuoc.nguyen@deakin.edu.au}
+}
+
+\maketitle
+
+\begin{abstract}
+This document is a model and instructions for \LaTeX.
+This and the IEEEtran.cls file define the components of your paper [title, text, heads, etc.]. *CRITICAL: Do Not Use Symbols, Special Characters, Footnotes, 
+or Math in Paper Title or Abstract.
+\end{abstract}
+
+\begin{IEEEkeywords}
+component, formatting, style, styling, insert.
+\end{IEEEkeywords}
+
+\section{Introduction}
+To be written.
+
+\section{Related Work}
+To be written.
+\cite{guan2024identifyingdriftdiffusioncausal}
+
+\section{Methodology}
+We assume the stochastic differential equation (SDE) to be time-homogeneous linear additive
+noise and defined in $\mathbb{R}^d$, its form is as follows:
+\begin{equation}\label{SDE_general_form}
+d\mathbf{X}_t = \mathbf{AX}_tdt + \mathbf{G}d\mathbf{W}_t,
+\end{equation}
+where:
+\begin{itemize}
+    \item $\mathbf{A} \in \mathbb{R}^{d \times d}$ is the drift matrix.
+    \item $\mathbf{G} \in \mathbb{R}^{d \times m}$ is the diffusion matrix; its \textit{instantaneous}
+        covariance is $\mathbf{H} := \mathbf{GG}^\top \succ 0 \hspace{0.15cm} (\mathbf{H} \in \mathbb{R}^{d \times d})$.
+    \item $\mathbf{W}_t$ is a \textit{m}-dimensional standard Wiener process.
+\end{itemize}
+
+We observe \textit{N} independent trajectories $\bigl\{\mathbf{X}^{(j)}_{i\Delta t}\bigr\}_{i=0}^{T}$ on an equally-spaced
+grid $t_i = i \Delta t$ (step-size $\Delta t > $), where \textit{T} is the total time steps and the increments are denoted as
+$\Delta\mathbf{X}_i^{(j)} = \mathbf{X}_{i+1}^{(j)} - \mathbf{X}_i^{(j)} \hspace{0.15cm} (j = 0, 1, ..., N)$.
+
+As mentioned earlier, our problem is the missing temporal order, which means the steps presented in the trajectories are not in
+the correct order with respect to time. To deal with this problem, we propose our score-based iterative method.
+For each iteration, there will be two parts presented in section A and B below, respectively.
+
+\subsection{Estimate SDE parameters from Maximum Likelihood}
+For small $\Delta t$ the exact transition can be replaced by the first-order scheme
+\begin{equation}\label{Euler_discretization}
+    \Delta \mathbf{X}_i^{(j)} = \mathbf{AX}_i^{(j)}\Delta t + \boldsymbol{\varepsilon}_i^{(j)}, \hspace{0.15cm}
+    \boldsymbol{\varepsilon}_i^{(j)} \sim \mathcal{N}(\mathbf{0}, \hspace{0.05cm} \mathbf{H}\Delta t).
+\end{equation}
+Since each increment is Gaussian, we can write down the probability density of one increment as follows:
+\begin{multline}\label{prob_density}
+    p(\Delta \mathbf{X}_i^{(j)} \mid \mathbf{X}_i^{(j)};\mathbf{A}, \mathbf{H})
+        = \frac{1}{(2\pi)^{d/2}|\mathbf{H}\Delta t|^{1/2}} \cdot\\
+        \text{exp}\Bigl(-\frac{1}{2}[\Delta \mathbf{X}_i^{(j)} - \mathbf{A}\mathbf{X}_i^{(j)}\Delta t]^\top(\mathbf{H}\Delta t)^{-1}[\Delta\mathbf{X}_i^{(j)} - \mathbf{A}\mathbf{X}_i^{(j)}\Delta t]\Bigr) \\
+        = (2\pi\Delta t)^{-d/2}|\mathbf{H}|^{-1/2} \cdot \\
+        \text{exp}\Bigl(-\frac{1}{2\Delta t}[\Delta \mathbf{X}_i^{(j)} - \mathbf{A}\mathbf{X}_i^{(j)}\Delta t]^\top\mathbf{H}^{-1}[\Delta\mathbf{X}_i^{(j)} - \mathbf{A}\mathbf{X}_i^{(j)}\Delta t]\Bigr).
+\end{multline}
+Assuming independence between increments and trajectories, the joint likelihood of all increments is the
+product of each conditional likelihood:
+\[
+    \text{Likelihood}(\mathbf{A}, \mathbf{H}) = \prod_{j=1}^{N} \prod_{i=0}^{T-1}p(\Delta \mathbf{X}_i^{(j)} \mid \mathbf{X}_i^{(j)};\mathbf{A}, \mathbf{H}).
+\]
+Taking logarithms, we have the log-likelihood function $\mathcal{L}$:
+\begin{equation}
+\begin{aligned}
+    \mathcal{L}(\mathbf{A}, \mathbf{H}) &= \text{log}(\text{Likelihood}(\mathbf{A}, \mathbf{H})) \\
+    &= \sum_{j=1}^{N} \sum_{i=0}^{T-1} \text{log}p(\Delta \mathbf{X}_i^{(j)} \mid \mathbf{X}_i^{(j)};\mathbf{A}, \mathbf{H}).
+\end{aligned}\label{log_likelihood}
+\end{equation}
+Substituting explicitly from \eqref{log_likelihood}:
+\begin{multline}\label{explicit_log_likelihood}
+    \mathcal{L}(\mathbf{A}, \mathbf{H}) = \sum_{j=1}^{N} \sum_{i=0}^{T-1} \Biggl[-\frac{d}{2}\text{log}(2\pi\Delta t) - \frac{1}{2}\text{log}|\mathbf{H}| \\
+        - \frac{1}{2\Delta t}[\Delta\mathbf{X}_i^{(j)} - \mathbf{AX}_i^{(j)}\Delta t]^\top\mathbf{H}^{-1}[\Delta\mathbf{X}_i^{(j)} - \mathbf{AX}_i^{(j)}\Delta t]\Biggr] \\
+        = -\frac{dNT}{2}\text{log}(2\pi\Delta t)-\frac{NT}{2}\text{log}|\mathbf{H}|\\
+        -\frac{1}{2\Delta t}\sum_{j=1}^{N} \sum_{i=0}^{T-1}[\Delta \mathbf{X}_i^{(j)} - \mathbf{A}\mathbf{X}_i^{(j)}\Delta t]^\top\mathbf{H}^{-1}[\Delta\mathbf{X}_i^{(j)} - \mathbf{A}\mathbf{X}_i^{(j)}\Delta t].
+\end{multline}
+
+Then, given the current trajectories (either the original unordered trajectories if it is the first
+iteration, or the reordered trajectories from the previous iteration), we can update the SDE parameters via maximum likelihood estimation.
+
+\mbox{}
+\subsubsection{Fixing $\mathbf{H}$ and estimate $\mathbf{A}$} \mbox{}\\
+First, we define the residuals:
+\[
+\mathbf{R}_i^{(j)}(\mathbf{A})
+= 
+\Delta\mathbf{X}_i^{(j)} - \mathbf{AX}_i^{(j)}\Delta t
+\]
+The log-likelihood, as a function of $\mathbf{A}$ since $\mathbf{H}$ is fixed, is:
+\[
+    \mathcal{L}(\mathbf{A}) \propto -\frac{1}{2\Delta t}
+    \sum_{j=1}^{N} \sum_{i=0}^{T-1} \mathbf{R}_i^{(j)}(\mathbf{A})^\top \mathbf{H}^{-1}\mathbf{R}_i^{(j)}(\mathbf{A})
+\]
+Then, we set the gradient of $\mathcal{L}(\mathbf{A})$ to zero to find $\hat{\mathbf{A}}$:
+\[
+    \nabla_{\mathbf{A}}\mathcal{L}(\mathbf{A}) = 0 \Rightarrow
+    \sum_{i, j} \mathbf{H}^{-1}\Bigl(\Delta\mathbf{X}_i^{(j)} - \mathbf{AX}_i^{(j)}\Delta t\Bigr)\mathbf{X}_i^{(j)\top} = 0
+\]
+Since $\mathbf{H}^{-1}$ is invertible, this can be simplified to:
+\[
+    \sum_{i, j} \Delta\mathbf{X}_i^{(j)}\mathbf{X}_i^{(j)\top}
+    = \mathbf{A}\Delta t \sum_{i, j}\mathbf{X}_i^{(j)}\mathbf{X}_i^{(j)\top}
+\]
+Provided the Gram matrix $\sum_{i, j}\mathbf{X}_i^{(j)}\mathbf{X}_i^{(j)\top}$ is invertible, the explicit MLE solution for
+$\mathbf{A}$ is:
+\begin{equation}\label{A_MLE}
+    \hat{\mathbf{A}} = \frac{1}{\Delta t}\Bigl(\sum_{i, j}\Delta\mathbf{X}_i^{(j)}\mathbf{X}_i^{(j)\top}\Bigr)\Bigl(\sum_{i, j}\mathbf{X}_i^{(j)}\mathbf{X}_i^{(j)\top}\Bigr)^{-1}
+\end{equation}
+
+\subsubsection{Fixing $\mathbf{A}$ and estimate $\mathbf{H}$} \mbox{}\\
+Given the estimated $\hat{\mathbf{A}}$, we now begin to estimate $\mathbf{H}$ by substituting $\hat{\mathbf{A}}$ into the residuals.
+The covariance estimator $\hat{\mathbf{H}}$ is the covariance of these residuals:
+\begin{multline}\label{H_MLE}
+    \hat{\mathbf{H}} = \frac{1}{NT\Delta t}\sum_{i, j}\Bigl(\Delta\mathbf{X}_i^{(j)} - \mathbf{\hat{A}X}_i^{(j)}\Delta t\Bigr) \cdot \\
+    \Bigl(\Delta\mathbf{X}_i^{(j)} - \mathbf{\hat{A}X}_i^{(j)}\Delta t\Bigr)^\top
+\end{multline}
+
+\subsection{Update previously-sorted trajectories}
+After estimating the SDE parameters $\hat{\mathbf{A}}$ and $\hat{\mathbf{H}}$ based on the current ordering of trajectories
+(or the initial unordered data), the next step is to re-evaluate and potentially reorder the sequence of observed states
+$\{\mathbf{X}_0, \mathbf{X}_1, \ldots, \mathbf{X}_T\}$. The goal is to find the permutation $\pi = (\pi_0, \pi_1, \ldots, \pi_T)$
+of the original indices $\{0, 1, \ldots, T\}$ that maximizes the likelihood of the observed sequence under the estimated SDE dynamics.
+
+For an Itô-diffusion with constant diffusion matrix $\mathbf{G}$,
+\[
+    d\mathbf{X}_t = b(\mathbf{X}_t)dt + \mathbf{G} d\mathbf{W}_t,
+\]
+the \textbf{time-reversed} process is again a diffusion whose drift $\bar{b}$ satisfies the time-reversal (cite Nelson-Haussmann-Pardoux)
+identity:
+\begin{equation}\label{time_reversed_drift}
+    \bar{b}(\mathbf{X}_t) = b(\mathbf{X}_t) - \mathbf{G}\mathbf{G}^\top \nabla_x\log p_t(x)
+\end{equation}
+with the same diffusion coefficient $\mathbf{G}$.
+Equation \eqref{time_reversed_drift} says the gap between forward and backward drift equals the scaled score (gradient of the log-density).
+Thus, if we have snapshots at two instants $t$ and $s$ (unknown order) and a short time-lag $\Delta t = |s - t|$, the direction that makes
+\eqref{time_reversed_drift} fit the data best is (with high probability) the correct temporal order.
+
+The marginal distribution at time $t$ of the linear Gaussian SDE is Gaussian, expressed as:
+\[
+    p_t(\mathbf{x}) = \mathcal{N}(\boldsymbol{\mu}_t, \boldsymbol{\Sigma}_t),
+\]
+where the mean $\boldsymbol{\mu}_t$ and covariance $\boldsymbol{\Sigma}_t$ satisfy the following ODEs:
+\begin{align*}
+    \frac{d}{dt}\boldsymbol{\mu}_t &= \mathbf{A}\boldsymbol{\mu}_t, \\
+    \frac{d}{dt}\boldsymbol{\Sigma}_t &= \mathbf{A}\boldsymbol{\Sigma}_t + \boldsymbol{\Sigma}_t\mathbf{A}^{\top} + \mathbf{H}.
+\end{align*}
+
+From these Gaussian approximations, the \emph{score function} at timestep $t$ is:
+\[
+    \nabla_{\mathbf{x}}\log p_t(\mathbf{x}) = -\boldsymbol{\Sigma}_t^{-1}(\mathbf{x}-\boldsymbol{\mu}_t).
+\]
+
+Practically, given data, we estimate:
+\begin{align}
+    \hat{\boldsymbol{\mu}}_t &= \frac{1}{N}\sum_{j=1}^{N}\mathbf{X}^{(j)}_t, \label{mean_est}\\
+    \hat{\boldsymbol{\Sigma}}_t &= \frac{1}{N-1}\sum_{j=1}^{N}(\mathbf{X}^{(j)}_t - \hat{\boldsymbol{\mu}}_t)(\mathbf{X}^{(j)}_t - \hat{\boldsymbol{\mu}}_t)^{\top}.\label{cov_est}
+\end{align}
+
+Thus, the empirical Gaussian score, to be used for \eqref{time_reversed_drift}, becomes:
+\begin{equation}\label{empirical_score}
+    \nabla_{\mathbf{x}}\log \hat{p}_t(\mathbf{x}) = -\hat{\boldsymbol{\Sigma}}_t^{-1}(\mathbf{x}-\hat{\boldsymbol{\mu}}_t).
+\end{equation}
+
+Equation \eqref{empirical_score} gives us the score function at time $t$. Using this score function, we can compute the
+scores at two time points $t, s$ and the corresponding estimated errors for the estimated drift between the two time points.
+The empirical drift $\hat{\mathbf{b}}$ is computed as:
+\begin{equation}\label{empirical_drift}
+    \hat{\mathbf{b}} = \mathbb{E}[\mathbf{X}_s - \mathbf{X}_t]/\Delta t.
+\end{equation}
+The error between the empirical drift and the drift predicted by the score function scaled by $\mathbf{H}$ is:
+\begin{equation}\label{error}
+    \text{Error}(\mathbf{X}_t) = ||\hat{\mathbf{b}} - \mathbf{H}\cdot\nabla_{\mathbf{x}}\log \hat{p}_t(\mathbf{x})||^2.
+\end{equation}
+
+Putting all the pieces together, we can compute the score function at time $t$ using \eqref{empirical_score} and the empirical drift
+using \eqref{empirical_drift}. The error between the empirical drift and the drift predicted by the score function scaled by $\mathbf{H}$
+is computed using \eqref{error}. Then we can compare the errors at two time steps, whichever step has the smaller error is therefore assumed to be more likely to fit into the \textbf{time-reversed} process. Algorithm \ref{main_algorithm} below shows in detail how we leverage this idea to reorder the
+trajectories point-by-point.
+
+% Now that we have the score function and the estimated , we can compute the score matching loss between the forward and backward drift
+% for each pair of states $\mathbf{X}_t$ and $\mathbf{X}_s$ and then sort the states based on that. Algorithm 1 below shows
+% our proposed method in detail.
+\begin{algorithm}
+    \caption{Score-based iterative method for estimating SDE parameters and reordering trajectories.}
+    \label{main_algorithm}
+    \begin{algorithmic}[1]
+        \renewcommand{\algorithmicrequire}{\textbf{Input:}}
+        \renewcommand{\algorithmicensure}{\textbf{Output:}}
+        \REQUIRE Un-ordered data $\mathbf{X}$, number of iterations $\mathbf{K}$, number of timesteps $T$
+        \ENSURE  Re-ordered data $\tilde{\mathbf{X}}$ and estimated parameters $\mathbf{A}$, $\mathbf{H}$
+        % \\ \textit{Initialisation} :
+        % \STATE first statement
+        % \\ \textit{LOOP Process}
+        \FOR {$i = 1$ to $K$}
+            \STATE $\hat{\mathbf{A}}$, $\hat{\mathbf{H}} \gets $ SDE-Parameters-Solving (from \eqref{A_MLE} and \eqref{H_MLE})
+            \STATE $end \gets T - 1$
+            \WHILE {$end \neq 0$}
+                \FOR {$t = 0, ..., end - 1$}
+                    \STATE $s \gets t + 1$
+                    \STATE Score($\mathbf{X}_t) =\nabla_{\mathbf{x}}\log \hat{p}_t(\mathbf{x})$
+                    \STATE Score($\mathbf{X}_s) =\nabla_{\mathbf{x}}\log \hat{p}_s(\mathbf{x})$
+                    \STATE $\hat{\mathbf{b}} = \mathbb{E}[\mathbf{X}_s - \mathbf{X}_t]/\Delta t \hspace{1.5cm}$ (Empirical Drift)
+                    \STATE Error($\mathbf{X}_t) = ||\hat{\mathbf{b}} - \mathbf{H}\cdot\text{Score}(\mathbf{X}_t)||^2$
+                    \STATE Error($\mathbf{X}_s) = ||\hat{\mathbf{b}} - \mathbf{H}\cdot\text{Score}(\mathbf{X}_s)||^2$
+                    \IF {$\text{Error}(\mathbf{X}_t) < \text{Error}(\mathbf{X}_s)$}
+                        \STATE Swap $\mathbf{X}_t$ and $\mathbf{X}_s$, since $s > t$ is more likely
+                    \ENDIF
+                \ENDFOR
+            \ENDWHILE
+            \STATE Check-convergence $\rightarrow$ True: Stop Algorithm
+        \ENDFOR
+        \RETURN $\tilde{\mathbf{X}}$, $\hat{\mathbf{A}}$, and $\hat{\mathbf{H}}$
+    \end{algorithmic} 
+\end{algorithm}
+
+Algorithm \ref{main_algorithm} combines parameter estimation and trajectory reordering in an iterative loop. In each iteration, the SDE parameters
+(drift A and diffusion H) are first updated using the current order of the data. Then, for each adjacent pair of time steps, the algorithm:
+
+\begin{itemize}
+    \item Computes the empirical score (the gradient of the log-density estimate) at the two time points.
+    \item Calculates an empirical drift estimate from the change in state over the time interval.
+    \item Quantifies the discrepancy between the empirical drift and the drift predicted by the score function scaled by H.
+    \item Compares the computed errors; if the error for the earlier time point exceeds that for the later point, a swap is performed,
+    indicating that the observed order is likely reversed.
+\end{itemize}
+
+This process is repeated in a similar manner to the popular sorting algorithm named Bubble Sort, until the ordering converges, ensuring that
+the temporal direction in the data aligns optimally with the underlying SDE dynamics.
+
+\section{Experiments}
+In this section, we write down all the implementation details of our proposed method and different experiments, including the main setting, such that the readers can reproduce our results. We also introduce the datasets and baseline method
+we used in our experiments and the evaluation metrics. Our code is available on Github\footnote{\href{https://github.com/longsc2603/First_paper_notes/tree/main/experiment}{Github}}.
+
+\subsection{Datasets and Experiments}
+\subsubsection{Main setting}
+Our main setting uses the data following the time-homogeneous linear additive noise SDE form mentioned in \eqref{SDE_general_form}, which is generated using Euler-Maruyama discretization:
+\[
+    \mathbf{X}_{i+1}^{(j)} = \mathbf{X}_i +  \mathbf{AX}_i^{(j)}\Delta t + \mathbf{G}d\mathbf{W}_i.
+\]
+
+The dataset typically has shape $(num\_trajectories,$ $num\_timesteps, d)$, where $d$ is the dimension of each data point. From this, we then randomize the data along the time-step dimension to obtain the data with lost temporal order as input. This input data will then be processed using our proposed method to obtain the temporally sorted data and the estimated parameters $\mathbf{A}, \mathbf{H}$.
+
+In this main setting, we test our method many times to demonstrate how changes in time step size $\Delta t$, total time period $T$, data dimension $d$, number of trajectories, and drift-diffusion parameter initialization individually affect its performance.
+\subsubsection{Noisy Measurement Setting}
+Many previous work \textbf{cite here} also explore the problem of estimating parameters when given noisy data. Thus, we also generate data that are corrupted by Gaussian noise at each time step:
+\[
+    \mathbf{Y}_t = \mathbf{X}_t + \boldsymbol{\epsilon}_t, \hspace{0.15cm}
+    \boldsymbol{\epsilon}_t \sim \mathcal{N}(\mathbf{0}, \hspace{0.05cm} \mathbf{R}),
+\]
+where $\mathbf{R} = \sigma_\epsilon^2\mathbf{I}$.
+
+Because both the state and the noise are Gaussian, the observed data at a single time-slice are still Gaussian, so we can still use our proposed Algorithm \ref{main_algorithm}, with some small modifications from \eqref{mean_est} and \eqref{cov_est}:
+\begin{align*}
+    \hat{\mathbf{S}}_t &= \frac{1}{N-1}\sum_{j=1}^{N}(\mathbf{Y}^{(j)}_t - \hat{\boldsymbol{\mu}}_t)(\mathbf{Y}^{(j)}_t - \hat{\boldsymbol{\mu}}_t)^{\top},\\
+    \hat{\boldsymbol{\Sigma}}_t &= \hat{\mathbf{S}}_t - \mathbf{R},
+\end{align*}
+where $\hat{\mathbf{S}}_t$ is the sample covariance of $\mathbf{Y}_t$ instead of $\mathbf{X}_t$, we use the same mean $\hat{\boldsymbol{\mu}}_t$ since the measurement noise $\boldsymbol{\epsilon}_t$ is zero-mean.
+
+\subsubsection{Real Datasets and Evaluation}
+Ornstein-Uhlenbeck processes are a popular example of a time-homogeneous linear additive noise SDE, and are used in many real-world examples \textbf{cite here}. Thus, we test our algorithm on some real datasets as follows:
+\begin{itemize}
+    \item US Treasury yields – FRED “DGS10”\footnote{\href{https://fred.stlouisfed.org/series/DGS10/}{FRED}}: Daily 10-year constant-maturity Treasury yield (plus dozens of other terms) since 1962.
+    \item Single-particle Brownian trajectories – Figshare “Dynamic and asymmetric colloidal molecules”\footnote{\href{https://figshare.com/articles/dataset/Raw_dataset_for_the_research_article_Dynamic_and_asymmetric_colloidal_molecules_/28489979}{Molecules}}: This dataset contains time-stamped $(x, y, z, t)$ coordinates of fluorescent colloidal particles acquired with 3-D confocal microscopy. Translational motion of each bead in an optical trap is an OU process with additive (thermal) diffusion.
+    \item UCI “Individual Household Electric Power Consumption”\footnote{\href{https://archive.ics.uci.edu/dataset/235/individual+household+electric+power+consumption}{Power}}: Minute-level active/reactive power, current and voltage for one French household over 47 months (about 2 million time steps). A multivariate OU process can capture short-time mean-reversion of load and voltage around diurnal trends. Furthermore, additive Gaussian measurement error is explicit in the documentation.
+\end{itemize}
+Generally, ground-truth parameters are absent for real-world datasets. So we cannot simply use Mean Absolute Error (MAE) or Mean Squared Error (MSE) as evaluation metrics like in the case of synthetic data. Instead, we use some different evaluation techniques as follow:
+\begin{itemize}
+    \item Out-of-sample negative log–likelihood (NLL), or MAE:
+        \begin{enumerate}
+            \item Split the time series into train/test blocks.
+            \item Apply our model to the train part, and use it as a generative model to predict the next step with the transition formula \eqref{Euler_discretization}.
+            \item Then compute NLL/MAE on the test block. Lower NLL/MAE often suggest better fit.
+        \end{enumerate}
+    \item Coverage of prediction intervals:
+        \begin{enumerate}
+            \item Using the fitted parameters, generate 95\% predictive ellipsoids.
+            \item Count how often the next data point falls inside.
+            \item Over many steps the data should hit $\approx$ 95\%. Under-coverage can suggest diffusion underestimated and over-coverage means over-estimated model.
+        \end{enumerate}
+    \item Posterior predictive checks: Answer the question “If my fitted SDE were the truth, would I see time series that look like my data?”.
+        \begin{enumerate}
+            \item Simulate many synthetic datasets from the fitted parameters.
+            \item Compute relevant summary statistics (variance, hitting times, etc.) for both synthetic and real data.
+            \item Then visualise the real statistic inside the simulated distribution (histogram / box-plot). Large discrepancies suggest estimator (or model class) inadequate.
+        \end{enumerate}
+\end{itemize}
+
+\subsection{Implementation Details}
+
+\section*{Acknowledgment}
+
+The preferred spelling of the word ``acknowledgment'' in America is without 
+an ``e'' after the ``g''. Avoid the stilted expression ``one of us (R. B. 
+G.) thanks $\ldots$''. Instead, try ``R. B. G. thanks$\ldots$''. Put sponsor 
+acknowledgments in the unnumbered footnote on the first page.
+
+\bibliographystyle{IEEEtran}
+\bibliography{IEEEabrv,paper}
+
+\end{document}
