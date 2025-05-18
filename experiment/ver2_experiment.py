@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import itertools
 import scipy
 import scipy.linalg
+import time
 
 from experiments import generate_independent_points, linear_additive_noise_data
 
@@ -12,7 +13,7 @@ def data_masking(data: np.ndarray) -> np.ndarray:
     at least one trajectory with data present there.
 
     Args:
-        data (np.ndarray): Input data with shape 
+        data (np.ndarray): Input data with shape
             (num_trajectories, num_segments, points_per_segment, d).
 
     Returns:
@@ -74,13 +75,13 @@ def sort_data_by_var(
         else:
             present_indices = dict(sorted(present_indices.items(), key=lambda x:x[1], reverse=True))
             present_indices = list(present_indices.keys())
-        
+
         temp = 0
         for id in range(data.shape[1]):
             if id in present_indices:
                 sorted_data[trajectory, id] = data[trajectory, present_indices[temp], :, :]
                 temp += 1
-        
+
     if known_initial_value:
         sorted_data = np.concatenate((first_segments, sorted_data), axis=1)
 
@@ -159,7 +160,7 @@ def compute_nll(X: np.ndarray, A: np.ndarray, H: np.ndarray, dt: float) -> float
         diff = X_tp1 - mu_t
         exponent = 0.5 * diff.T @ H_dt_inv @ diff
         nll += exponent + const_term
-    
+
     return nll
 
 
@@ -167,7 +168,7 @@ def compute_nlp(A: np.ndarray, H: np.ndarray, nll: float) -> float:
     """Compute the negative log-posterior (NLP) of the current segment under the
     current inferred model parameters. Based on Bayes's theorem, posterior is proportional
     to likelihood*prior. Thus, minimizing NLP would be the same as minimizing -(NLL + log_prior).
-    We assume that the prior on A is Gaussian and the prior on H is improper p(H) ~ 1/H -> 
+    We assume that the prior on A is Gaussian and the prior on H is improper p(H) ~ 1/H ->
     log p(H) = -log p(H)
 
     Args:
@@ -181,22 +182,22 @@ def compute_nlp(A: np.ndarray, H: np.ndarray, nll: float) -> float:
     # Enforce positivity constraint on diagonal elements of H
     if any(H[i, i] <= 0 for i in range(H.shape[0])):
         return np.inf
-    
+
     # --------- Log-Prior on A -----------
     # A ~ N(0, prior_std_a^2)
     # => log p(a) = -0.5 [ a^2 / (prior_std_a^2) + ln(2π (prior_std_a^2)) ]
     prior_var = 10
     log_prior_A = -0.5 * (
-        (A**2) / (prior_var) 
+        (A**2) / (prior_var)
         + np.log(2 * np.pi * (prior_var)))
-    
+
     # --------- Log-Prior on H ---------
     # H ~ N(0, prior_std_a^2)
     # => log p(H) = -0.5 [ H^2 / (prior_std_H^2) + ln(2π (prior_std_H^2)) ]
     log_prior_H = -0.5 * (
-        (H**2) / (prior_var) 
+        (H**2) / (prior_var)
         + np.log(2 * np.pi * (prior_var)))
-    
+
     # Combine them
     log_prior = np.sum(log_prior_A) + np.sum(log_prior_H)
 
@@ -214,7 +215,7 @@ def compute_distance(X: np.ndarray) -> float:
     """
     num_steps = X.shape[0]
     distance_cost = 0.0
-    
+
     for i in range(num_steps - 1):
         distance_cost += np.sqrt(np.sum(np.square(X[i, :] - X[i+1, :]))) # L2-distance
 
@@ -249,12 +250,12 @@ def reorder_trajectories(
         np.ndarray: A re-ordered array of segments.
     """
     num_trajectories, num_segments, steps_per_segment, d = data.shape
-    
+
     if known_initial_value:
         start_sorting_id = 1
     else:
         start_sorting_id = 0
-    
+
     for traj in range(num_trajectories):
         best_orderings = {}
         if num_segments >= 5:
@@ -272,7 +273,7 @@ def reorder_trajectories(
 
         count = 1
         for candidate_order in all_indices_permutations:
-            # candidate_order is a list of 2D arrays, now we stack it 
+            # candidate_order is a list of 2D arrays, now we stack it
             # to get the trajectory to compute NLL
             reordered_trajectory = np.stack(candidate_order, axis=0)
             # Evaluate the negative log-likelihood
@@ -296,11 +297,11 @@ def reorder_trajectories(
             # # beta = int(loss/distance_cost)
             # # print(beta, "beta")
             # loss += beta*distance_cost
-            
+
             # quick, dirty fix
             if loss in list(best_orderings.keys()):
                 # to make the loss slightly different due to some
-                # unknown reasons sometimes the loss are stuck at 
+                # unknown reasons sometimes the loss are stuck at
                 # a realy high value
                 count += 1
                 loss -= loss*count*1e-5
@@ -334,33 +335,91 @@ def cal_error(drift, H, score, n, d):
     return error
 
 
+def estimate_mean_cov(X):
+    X = np.asarray(X)
+    if X.ndim != 2:
+        raise ValueError("X must be a 2-D array with shape (N, d)")
+
+    # ---- mean ------------
+    m_hat = X.mean(axis=0)
+
+    # ---- covariance ------
+    # Unbiased sample covariance (divides by N-1)
+    C_hat = np.cov(X, rowvar=False, bias=False)
+
+    return m_hat, C_hat
+
+
 def cal_score(A, H, x_t, t, x0):
-    d = A.shape[0]
-    # 1) mean m_t
-    m_t = x0 @ scipy.linalg.expm(A * t)
+    # d = A.shape[0]
+    # # 1) mean m_t
+    # m_t = x0 @ scipy.linalg.expm(A * t)
 
-    # 2) build the 2d×2d block matrix
-    #      G = [ A      H
-    #            0   -A^T ]
-    G = np.block([
-        [A,        H       ],
-        [np.zeros((d,d)), -A.T]
-    ])
+    # # 2) build the 2d×2d block matrix
+    # #      G = [ A      H
+    # #            0   -A^T ]
+    # G = np.block([
+    #     [A,        H       ],
+    #     [np.zeros((d,d)), -A.T]
+    # ])
 
-    # 3) compute expm(G t)
-    M = scipy.linalg.expm(G * t)
+    # # 3) compute expm(G t)
+    # M = scipy.linalg.expm(G * t)
 
-    # 4) extract blocks
-    M12 = M[:d,    d:]   # top-right block = C(t)
-    M22 = M[d:,    d:]   # bottom-right block = D(t)
+    # # 4) extract blocks
+    # M12 = M[:d,    d:]   # top-right block = C(t)
+    # M22 = M[d:,    d:]   # bottom-right block = D(t)
 
-    # 5) P_t = C(t) @ D(t)^{-1}
-    P_t = M12.dot(scipy.linalg.inv(M22))
-    inv_P = np.linalg.inv(P_t)
+    # # 5) P_t = C(t) @ D(t)^{-1}
+    # P_t = M12.dot(scipy.linalg.inv(M22))
+
+    m_t, P_t = estimate_mean_cov(x_t)
+    try:
+        inv_P = np.linalg.inv(P_t)
+    except np.linalg.LinAlgError:
+        # If P_t is singular, use pseudo-inverse
+        inv_P = np.linalg.pinv(P_t)
 
     score = (x_t - m_t) @ (-inv_P)
 
     return score
+
+
+def quick_sort(arr: np.ndarray, A, H, time_step_size, x0) -> np.ndarray:
+    def partition(lo: int, hi: int) -> int:
+        """Partition around arr[hi] (the pivot)."""
+        pivot = arr[:, hi, :]
+        score_pivot = cal_score(A=A, H=H, x_t=pivot, t=time_step_size*(hi+1), x0=x0)
+        i = lo - 1
+        for j in range(lo, hi):
+            score_j = cal_score(A=A, H=H, x_t=arr[:, j, :], t=time_step_size*(j+1), x0=x0)
+            drift = np.mean((pivot - arr[:, j, :])/time_step_size, axis=0)
+            err_j = cal_error(drift=drift, H=H, score=score_j, n=arr.shape[0], d=A.shape[0])
+            err_pivot = cal_error(drift=drift, H=H, score=score_pivot, n=arr.shape[0], d=A.shape[0])
+            if err_j > err_pivot:
+                i += 1
+                temp = np.copy(arr[:, i, :])
+                arr[:, i, :] = np.copy(arr[:, j, :])
+                arr[:, j, :] = np.copy(temp)
+        temp = np.copy(arr[:, i + 1, :])
+        arr[:, i + 1, :] = np.copy(arr[:, hi, :])
+        arr[:, hi, :] = np.copy(temp)
+        return i + 1
+
+    # ---- iterative quick‑sort (explicit stack) ----
+    stack = [(0, arr.shape[1] - 1)]
+    while stack:
+        lo, hi = stack.pop()
+        if lo < hi:
+            p = partition(lo, hi)
+            # push larger side first so the smaller side is processed next,
+            # keeping the stack depth ≤ log₂(n) in the average case
+            if p - lo < hi - p:
+                stack.append((p + 1, hi))
+                stack.append((lo, p - 1))
+            else:
+                stack.append((lo, p - 1))
+                stack.append((p + 1, hi))
 
 
 def reorder_step_by_step(
@@ -368,7 +427,9 @@ def reorder_step_by_step(
     A: np.ndarray,
     H: np.ndarray,
     time_step_size: float,
-    known_initial_value: bool = False
+    nll: float,
+    known_initial_value: bool = False,
+    use_quick_sort: bool = False
     ) -> np.ndarray:
     """Reordering trajectory data to maximize our objective (log-likelihood minus DAG penalty),
     which is minimizing (negative log-likelihood plus DAG penalty)
@@ -398,96 +459,39 @@ def reorder_step_by_step(
     x0 = data[:, 0, :].reshape(num_trajectories, d)
     end = num_steps - 1
     temp_data = np.copy(data)
-    A = np.random.randn(d, d)
-    H = np.random.randn(d, d)
-    while end > start:
-        for i in range(start, end):
-            j = i + 1
-            x_i = temp_data[:, i, :].reshape(num_trajectories, d)
-            x_j = temp_data[:, j, :].reshape(num_trajectories, d)
-            score_i = cal_score(A=A, H=H, x_t=x_i, t=time_step_size*(i+1), x0=x0)
-            score_j = cal_score(A=A, H=H, x_t=x_j, t=time_step_size*(j+1), x0=x0)
-            drift = np.mean((x_j - x_i)/time_step_size, axis=0)
-            err_i = cal_error(drift=drift, H=H, score=score_i, n=num_trajectories, d=d)
-            err_j = cal_error(drift=drift, H=H, score=score_j, n=num_trajectories, d=d)
+    # if nll > 50:
+    #     A_temp = np.random.randn(d, d)
+    #     H_temp = np.random.randn(d, d)
+    # else:
+        # A_temp = A + np.random.randn(d, d)*0.5
+        # H_temp = H + np.random.randn(d, d)*0.5
+    A_temp, H_temp = A, H
+    if use_quick_sort:
+        s = time.time()
+        quick_sort(temp_data[:, 1:, :], A_temp, H_temp, time_step_size, x0)
+        print("Time taken for quick sort:", time.time() - s)
+    else:
+        s = time.time()
+        while end > start:
+            for i in range(start, end):
+                j = i + 1
+                x_i = temp_data[:, i, :].reshape(num_trajectories, d)
+                x_j = temp_data[:, j, :].reshape(num_trajectories, d)
+                score_i = cal_score(A=A_temp, H=H_temp, x_t=x_i, t=time_step_size*(i+1), x0=x0)
+                score_j = cal_score(A=A_temp, H=H_temp, x_t=x_j, t=time_step_size*(j+1), x0=x0)
+                drift = np.mean((x_j - x_i)/time_step_size, axis=0)
+                err_i = cal_error(drift=drift, H=H_temp, score=score_i, n=num_trajectories, d=d)
+                err_j = cal_error(drift=drift, H=H_temp, score=score_j, n=num_trajectories, d=d)
 
-            if err_i > err_j:
-                temp = np.copy(temp_data[:, i, :])
-                temp_data[:, i, :] = np.copy(temp_data[:, j, :])
-                temp_data[:, j, :] = np.copy(temp)
-            if i == end - 1:
-                end = i
+                if err_i < err_j:
+                    temp = np.copy(temp_data[:, i, :])
+                    temp_data[:, i, :] = np.copy(temp_data[:, j, :])
+                    temp_data[:, j, :] = np.copy(temp)
+                if i == end - 1:
+                    end = i
+        print("Time taken for bubble sort:", time.time() - s)
 
     return temp_data
-
-
-# def update_sde_parameters(
-#     trajectories: np.ndarray
-#     ) -> tuple[np.ndarray, np.ndarray]:
-#     """Given fully assembled (completed) trajectories, estimate (A, H)
-#     by maximizing the discrete-time likelihood of the linear SDE.
-#     We have:
-#         X_{t+1} - X_t = A*X_t + noise,
-#         noise ~ N(0, H), H = G*G^T
-    
-#     Steps:
-#         1. Compute A = (Sum of y_t*x_t^T)*(Sum of x_t*x_t^T)^(-1)
-#             where y_t = X_{t+1} - X_t
-#         2. Residuals e_t = y_t - A*x_t
-#         3. Sigma = average of e_t*e_t^T
-
-#     Args:
-#         trajectories (np.ndarray): Input data, shape (num_trajectories, num_steps, d)
-
-#     Returns:
-#         (np.ndarray, np.ndarray): Estimated A, H matrices to be updated
-#     """
-#     # Sum_xx and Sum_yx
-#     d = trajectories.shape[-1]  # dimension
-#     Sum_xx = np.zeros((d, d))
-#     Sum_yx = np.zeros((d, d))
-#     count = 0
-    
-#     # 1) Accumulate sums
-#     for traj in trajectories:
-#         num_steps = traj.shape[0]
-#         for t in range(num_steps - 1):
-#             x_t = traj[t]          # shape (d,)
-#             x_next = traj[t+1]
-#             y_t = x_next - x_t     # shape (d,)
-#             # y_t*x_t^T is (d x d)
-#             # x_t*x_t^T is (d x d)
-#             Sum_yx += np.outer(y_t, x_t)
-#             Sum_xx += np.outer(x_t, x_t)
-#             count += 1
-    
-#     # 2) Solve for A
-#     # A = (Sum of y_t*x_t^T) (Sum of x_t*x_t^T)^(-1)
-#     # We'll do a pseudo-inverse if necessary.
-#     try:
-#         inv_Sum_xx = np.linalg.inv(Sum_xx)
-#     except np.linalg.LinAlgError:
-#         inv_Sum_xx = np.linalg.pinv(Sum_xx)
-    
-#     A_est = Sum_yx @ inv_Sum_xx
-    
-#     # 3) Compute residuals & estimate Sigma
-#     #    e_t = y_t - A*x_t
-#     #    Sigma = sum(e_t*e_t^T)/count
-#     sum_ee = np.zeros((d, d))
-    
-#     for traj in trajectories:
-#         num_steps = traj.shape[0]
-#         for t in range(num_steps - 1):
-#             x_t = traj[t]
-#             x_next = traj[t+1]
-#             y_t = x_next - x_t
-#             e_t = y_t - A_est @ x_t
-#             sum_ee += np.outer(e_t, e_t)
-    
-#     H_est = sum_ee / count
-    
-#     return A_est, H_est
 
 
 def left_Var_Equation(A1, B1):
@@ -578,9 +582,9 @@ def check_convergence(score_list: list, score_type: str='NLL') -> bool:
     if score_type == 'NLL':
         if len(score_list) < 5:
             return False
-        if score_list[-1] < 0:
-            good_iterations = sum(1 for i in score_list if i < 0)
-            if good_iterations > 3:
+        if score_list[-1] < 2000:
+            good_iterations = sum(1 for i in score_list if i < 2000)
+            if good_iterations >= 5:
                 return True
             diff = [score_list[id].item() - score_list[id+1].item() for id in range(len(score_list)-1)]
             if np.sum(diff[-5:]) < 1:
@@ -678,7 +682,19 @@ def estimate_sde_parameters(
         # reordered_data = reorder_trajectories(reordered_data, A, H, time_step_size, alpha,
         #                                       known_initial_value=known_initial_value)
 
-        reordered_data = reorder_step_by_step(reordered_data, A, H, time_step_size,
+        if check_convergence(score_list=all_nlls):
+            # converged, should stop algorithm
+            right_percent_through_traj = []
+            for traj in range(num_trajectories):
+                right_value = ((original_data[traj] - reordered_data[traj]) == 0.0).astype(int)
+                right_value_count = (right_value == 1).sum()
+                right_value_count /= original_data[traj].shape[0]*original_data[traj].shape[1]
+                right_percent_through_traj.append(right_value_count)
+            right_percent = np.mean(right_percent_through_traj)
+            all_right_percent.append(right_percent)
+            break
+
+        reordered_data = reorder_step_by_step(reordered_data, A, H, time_step_size, float(average_nll.item()),
                                               known_initial_value=known_initial_value)
         
         # # Transform the data back to its previous shape
@@ -693,10 +709,6 @@ def estimate_sde_parameters(
             right_percent_through_traj.append(right_value_count)
         right_percent = np.mean(right_percent_through_traj)
         all_right_percent.append(right_percent)
-        
-        if check_convergence(score_list=all_nlls):
-            # converged, should stop algorithm
-            break
 
     return A, H, reordered_data, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_h, all_right_percent
 
@@ -716,64 +728,6 @@ def check_rank(data, A, H):
     rank = np.linalg.matrix_rank(M)
     
     return (rank == d, rank)
-
-
-def check_additive_noise_rank(
-    A: np.ndarray,
-    H: np.ndarray,
-    x0: np.ndarray,
-    tol: float = 1e-8
-    ) -> (bool, int):
-    """
-    Check the identifiability rank condition for the linear SDE with additive noise:
-        dX = A X dt + G dW,   X(0)=x0.
-
-    The condition is:
-        rank([x0, A x0, ..., A^(d-1)x0,
-              H[:,0], ..., H[:,d-1],
-              A H[:,0], ..., A^(d-1) H[:,d-1]])
-        == d,
-    where H = G @ G.T.
-
-    Parameters
-    ----------
-    A   : (d, d) array
-        Drift matrix.
-    G   : (d, m) array
-        Diffusion matrix.
-    x0  : (d,)   array
-        Initial state.
-    tol : float
-        Tolerance for numpy.linalg.matrix_rank.
-
-    Returns
-    -------
-    (is_identifiable, rank_value)
-        is_identifiable : True iff rank == d
-        rank_value      : the computed rank of the concatenated matrix
-    """
-    d = A.shape[0]
-    # --- 1) Build the list of column vectors for x0, A x0, ..., A^(d-1) x0
-    cols = []
-    for k in range(d):
-        v = np.linalg.matrix_power(A, k) @ x0
-        cols.append(v.reshape(d, 1))
-
-    # --- 3) For each power A^k H, append each of its d columns
-    for k in range(d):
-        AkH = np.linalg.matrix_power(A, k) @ H
-        # AkH is (d, d), so we take its d columns
-        for j in range(d):
-            cols.append(AkH[:, j].reshape(d, 1))
-
-    # --- 4) Stack all columns into one (d x N) matrix
-    M = np.hstack(cols)  # shape = (d, d + d*d)
-
-    # --- 5) Compute its rank
-    rank_val = np.linalg.matrix_rank(M, tol=tol)
-
-    # Identifiable iff rank == d
-    return (rank_val == d, rank_val)
 
 
 def run_experiment(
@@ -822,7 +776,7 @@ def run_experiment(
     points = generate_independent_points(d, d)
     X0_dist = [(point, 1 / len(points)) for point in points]
     X_appex = linear_additive_noise_data(
-        num_trajectories=num_trajectories, d=d, T=T, dt_EM=dt/5, dt=dt,
+        num_trajectories=num_trajectories, d=d, T=T, dt_EM=dt, dt=dt,
         A=A, G=G, sample_X0_once=True, X0_dist=X0_dist)
     print(X_appex.shape)
     
@@ -874,8 +828,11 @@ def run_experiment(
     # print(estimated_A, "A")
     # print(estimated_G, "G")
 
-    is_id, rank_val = check_rank(reordered_X, estimated_A, estimated_H)
-    print(f"Rank = {rank_val}, Identifiable? {is_id}")
+    try:
+        is_id, rank_val = check_rank(reordered_X, estimated_A, estimated_H)
+        print(f"Rank = {rank_val}, Identifiable? {is_id}")
+    except Exception as e:
+        print(f"Error in rank check: {e}")
 
     # Plot results
     random_X = random_X.reshape(random_X.shape[0], random_X.shape[1]*random_X.shape[2], random_X.shape[3])
@@ -904,7 +861,7 @@ def run_experiment(
     ax4 = fig.add_subplot(gs[1, 1])
 
     time = np.arange(num_points)
-    num_iterations = np.arange(len(all_nlls))
+    num_iterations = np.arange(1, len(all_nlls)+1)
     for i in range(X_appex.shape[0]):
         # data[i] is shape (num_points, 2)
         # Plot one line for each trajectory
@@ -920,7 +877,7 @@ def run_experiment(
     # ax1.legend()
 
     ax2_top.plot(num_iterations, all_mae_a, label=f"MAE to True A")
-    ax2_bottom.plot(num_iterations, all_mae_h, label=f"MAE to True G")
+    ax2_bottom.plot(num_iterations, all_mae_h, label=f"MAE to True H")
     ax2_top.set_xlabel('Epoch')
     ax2_top.set_ylabel('Mean Absolute Error')
     ax2_bottom.set_xlabel('Epoch')
@@ -958,17 +915,17 @@ def run_experiment(
 
 if __name__ == "__main__":
     # data generated by data_generation.py of APPEX code
-    d = 25
+    d = 10
     num_trajectories = 2000
-    max_iter = 100
+    max_iter = 25
     known_initial_value = False
 
     # Run different experiments
-    run_experiment(T=0.5, d=d, dt=0.01, num_trajectories=num_trajectories,
+    run_experiment(T=2.5, d=d, dt=0.01, num_trajectories=num_trajectories,
                    version=5, max_iter=max_iter, known_initial_value=known_initial_value)
 
     """
     Ver 2: Data without Temporal Order
-    Solution: First sort by variance, then do an iterative scheme with 2 steps, updating SDE's
-    parameters and re-sorting data based on the current params.
+    Solution: Follow an iterative scheme with 2 steps, updating SDE's
+    parameters and re-sorting data using empirical score estimation to sort step-by-step.
     """
