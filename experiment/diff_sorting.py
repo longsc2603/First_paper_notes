@@ -579,7 +579,17 @@ def sinkhorn(log_alpha, n_iters=50):
 class DifferentiableSorter(nn.Module):
     def __init__(self, num_steps: int, d: int):
         super().__init__()
-        self.linear = nn.Linear(d, num_steps)
+        self.linear1 = nn.Linear(d, num_steps)
+        self.relu = nn.ReLU()
+        self.linear2 = nn.Linear(num_steps, num_steps)
+        # Initialize the linear layer with truncated normal distribution (set a=0 to prevent negative values)
+        self.linear = nn.Sequential(
+            self.linear1,
+            self.relu,
+            self.linear2
+        )
+        # torch.nn.init.trunc_normal_(self.linear.weight, a=0, b=1)
+        # torch.nn.init.trunc_normal_(self.linear.bias, a=0, b=1)
 
     def forward(self, X):
         # X has shape (num_trajectories, num_steps, d)
@@ -983,7 +993,7 @@ if __name__ == "__main__":
     dt = 0.01
     num_trajectories = 1500
     version = 5
-    max_iter = 50
+    max_iter = 100
     known_initial_value = True
     noisy_measurements_sigma = 0
     data_missing_percent = 0

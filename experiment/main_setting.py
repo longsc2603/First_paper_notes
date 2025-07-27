@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import itertools
+import argparse
 import scipy
 import scipy.linalg
 import time
@@ -11,7 +11,12 @@ from numpy.lib.stride_tricks import sliding_window_view
 from experiments import generate_independent_points, linear_additive_noise_data
 
 
-def data_masking(data: np.ndarray, p: float = 0.2, known_initial_value: bool = False) -> np.ndarray:
+def data_masking(
+    data: np.ndarray,
+    p: float = 0.2,
+    known_initial_value: bool = False,
+    random_seed: int = 167
+    ) -> np.ndarray:
     """Randomly mask the input data, such that for each period of time there is
     at least one trajectory with data present there.
 
@@ -22,10 +27,12 @@ def data_masking(data: np.ndarray, p: float = 0.2, known_initial_value: bool = F
             Defaults to 0.2.
         known_initial_value (bool, optional): If True, the initial steps of trajectories are fixed.
             Defaults to False.
+        random_seed (int, optional): Random seed for reproducibility. Defaults to 167.
 
     Returns:
         np.ndarray: Randomly-masked data with default masking value np.nan.
     """
+    random.seed(random_seed)
     masked_data = np.copy(data)
     if known_initial_value:
         start = 1
@@ -82,64 +89,6 @@ def knn_impute_with_temporal_context(data_missing, window_size=3, n_neighbors=3)
         imputed_data[i] = center_vals
 
     return imputed_data
-
-
-def sort_data_by_var(
-    data: np.ndarray,
-    known_initial_value: np.ndarray = None,
-    decreasing_var: bool = False
-    ) -> np.ndarray:
-    """Sorting input data by the variance of the segments of each trajectory.
-
-    Args:
-        data (np.ndarray): Matrix with shape
-            (num_trajectories, num_segments, points_per_segment, d).
-        decreasing_var (bool, optional): If True, sorting by decreasing variance, this
-            is for the case of converging SDEs, such as OU processes. Defaults to False.
-        known_initial_value (bool, optional): If True, the initial values of trajectories
-            are known beforehand, and should stay fixed. Defaults to False.
-
-    Returns:
-        np.ndarray: Sorted data with the same shape.
-    """
-    if known_initial_value:
-        first_segments = np.zeros((data.shape[0], 1, data.shape[2], data.shape[3]))
-        first_segments[:, 0] = data[:, 0]
-        data = np.copy(data[:, 1:])
-        sorted_data = np.zeros((data.shape))
-    else:
-        sorted_data = np.zeros((data.shape))
-    for trajectory in range(data.shape[0]):
-        all_variances = []
-        for segment in range(data.shape[1]):
-            if np.any(data[trajectory, segment, :, :] == -999):
-                all_variances.append(-99)
-                continue
-            # Compute covariance matrix
-            cov_matrix = np.cov(data[trajectory, segment, :, :],
-                rowvar=False, ddof=1)  # rowvar=False means columns are variables
-            # Compute total variance as the trace of the covariance matrix
-            var = np.trace(cov_matrix)
-            all_variances.append(var)
-        # Sorting segments by their variances, missing segments stay in the same positions
-        present_indices = {id:value for id, value in enumerate(all_variances) if value != -99}
-        if decreasing_var:
-            present_indices = dict(sorted(present_indices.items(), key=lambda x:x[1]))
-            present_indices = list(present_indices.keys())
-        else:
-            present_indices = dict(sorted(present_indices.items(), key=lambda x:x[1], reverse=True))
-            present_indices = list(present_indices.keys())
-
-        temp = 0
-        for id in range(data.shape[1]):
-            if id in present_indices:
-                sorted_data[trajectory, id] = data[trajectory, present_indices[temp], :, :]
-                temp += 1
-
-    if known_initial_value:
-        sorted_data = np.concatenate((first_segments, sorted_data), axis=1)
-
-    return sorted_data
 
 
 def dag_penalty(A: np.ndarray, alpha: float = 0.1) -> float:
@@ -258,130 +207,6 @@ def compute_nlp(A: np.ndarray, H: np.ndarray, nll: float) -> float:
     return nll - log_prior
 
 
-def compute_distance(X: np.ndarray) -> float:
-    """Calculating L2-distance between all pairs of consecutive points given in the input trajectory
-
-    Args:
-        X (np.ndarray): 2D arrays of points with shape (num_steps, d).
-
-    Returns:
-        distance_cost (float): Total distance cost.
-    """
-    num_steps = X.shape[0]
-    distance_cost = 0.0
-
-    for i in range(num_steps - 1):
-        distance_cost += np.sqrt(np.sum(np.square(X[i, :] - X[i+1, :]))) # L2-distance
-
-    return distance_cost
-
-
-def reorder_trajectories(
-    data: np.ndarray,
-    A: np.ndarray,
-    H: np.ndarray,
-    time_step_size: float,
-    alpha: float = 0.5,
-    beta: float = 10,
-    known_initial_value: bool = False
-    ) -> np.ndarray:
-    """Reordering trajectory data to maximize our objective (log-likelihood minus DAG penalty),
-    which is minimizing (negative log-likelihood plus DAG penalty)
-
-    Args:
-        data (np.ndarray): Arrays of trajectory to be re-ordered,
-            shape (num_trajectories, num_segments, points_per_segment, d).
-        A (np.ndarray): Current estimated drift matrix, shape (d, d).
-        H (np.ndarray): Current estimated (observational) diffusion matrix, shape (d, d).
-        time_step_size (float): Step size with respect to time between points.
-        alpha (float, optional): Regularization hyper-parameter for DAG penalty. Defaults to 0.1.
-        beta (float, optional): Penalization hyper-parameter used in calculating loss of ordering.
-            Loss = NLL + DAG_penalty + beta*Distance_cost
-        known_initial_value (bool, optional): If True, the initial values of trajectories
-            are known beforehand, and should stay fixed. Defaults to False.
-
-    Returns:
-        np.ndarray: A re-ordered array of segments.
-    """
-    num_trajectories, num_segments, steps_per_segment, d = data.shape
-
-    if known_initial_value:
-        start_sorting_id = 1
-    else:
-        start_sorting_id = 0
-
-    for traj in range(num_trajectories):
-        best_orderings = {}
-        if num_segments >= 5:
-            num_orderings_kept = 5
-        else:
-            num_orderings_kept = num_segments
-
-        # Find all permutations of the trajectory's not-missing segments
-        if known_initial_value:
-            all_indices_permutations = list(itertools.permutations(data[traj, start_sorting_id:]))
-            all_indices_permutations = [[data[traj, 0, :, :]] + list(item) for item in all_indices_permutations]
-        else:
-            all_indices_permutations = list(itertools.permutations(data[traj]))
-            all_indices_permutations = [list(item) for item in all_indices_permutations]
-
-        count = 1
-        for candidate_order in all_indices_permutations:
-            # candidate_order is a list of 2D arrays, now we stack it
-            # to get the trajectory to compute NLL
-            reordered_trajectory = np.stack(candidate_order, axis=0)
-            # Evaluate the negative log-likelihood
-            nll = compute_nll(reordered_trajectory, A, H, time_step_size)
-            # nlp = compute_nlp(nll=nll, A=A, H=H)
-            # Also compute a DAG penalty on A
-            # penalty = dag_penalty(A, alpha)
-            loss = nll
-
-            # quick, dirty fix
-            if loss == -(np.inf):
-                loss = -1e10
-            elif loss == np.inf:
-                loss = 1e10
-
-            # loss = np.log(loss)
-
-            # distance_cost = compute_distance(X=reordered_trajectory)
-            # # print(loss, "loss")
-            # # print(distance_cost, "distance")
-            # # beta = int(loss/distance_cost)
-            # # print(beta, "beta")
-            # loss += beta*distance_cost
-
-            # quick, dirty fix
-            if loss in list(best_orderings.keys()):
-                # to make the loss slightly different due to some
-                # unknown reasons sometimes the loss are stuck at
-                # a realy high value
-                count += 1
-                loss -= loss*count*1e-5
-
-            best_orderings.update({loss: reordered_trajectory})
-            best_orderings = dict(sorted(best_orderings.items(), key=lambda x:x[0])) # sort by key
-            if len(best_orderings) > num_orderings_kept:
-                best_orderings.popitem()
-
-        # print([item.item() for item in list(best_orderings.keys())])
-        # # Update the current trajectory randomly to one of the best trajectories just found
-        # probabilities = list(best_orderings.keys())
-        # # [-200, -4, 0, 52] --> [0, 196, 200, 252]
-        # probabilities = [float(item) + abs(float(np.min(probabilities))) for item in probabilities]
-        # # [0, 196, 200, 252] --> [0, 196/252, 200/252, 1]
-        # probabilities = [item/max(probabilities) if max(probabilities) > 0 else item for item in probabilities]
-        # probabilities = scipy.special.softmax(probabilities)
-        # try:
-        #     choice = np.random.choice(list(best_orderings.keys()), 1, p=probabilities)
-        #     data[traj] = best_orderings[float(choice[0])]
-        # except:
-        data[traj] = list(best_orderings.values())[0]
-
-    return data
-
-
 def cal_error(drift, H, score, n, d):
     drift = np.full((n, d), drift)
     error = np.mean(np.square(drift - score @ H))
@@ -439,43 +264,6 @@ def cal_score(A, H, x_t, t, x0, noisy_measurements_sigma=0):
     return score
 
 
-def quick_sort(arr: np.ndarray, A, H, time_step_size, x0) -> np.ndarray:
-    def partition(lo: int, hi: int) -> int:
-        """Partition around arr[hi] (the pivot)."""
-        pivot = arr[:, hi, :]
-        score_pivot = cal_score(A=A, H=H, x_t=pivot, t=time_step_size*(hi+1), x0=x0)
-        i = lo - 1
-        for j in range(lo, hi):
-            score_j = cal_score(A=A, H=H, x_t=arr[:, j, :], t=time_step_size*(j+1), x0=x0)
-            drift = np.mean((pivot - arr[:, j, :])/time_step_size, axis=0)
-            err_j = cal_error(drift=drift, H=H, score=score_j, n=arr.shape[0], d=A.shape[0])
-            err_pivot = cal_error(drift=drift, H=H, score=score_pivot, n=arr.shape[0], d=A.shape[0])
-            if err_j > err_pivot:
-                i += 1
-                temp = np.copy(arr[:, i, :])
-                arr[:, i, :] = np.copy(arr[:, j, :])
-                arr[:, j, :] = np.copy(temp)
-        temp = np.copy(arr[:, i + 1, :])
-        arr[:, i + 1, :] = np.copy(arr[:, hi, :])
-        arr[:, hi, :] = np.copy(temp)
-        return i + 1
-
-    # ---- iterative quick‑sort (explicit stack) ----
-    stack = [(0, arr.shape[1] - 1)]
-    while stack:
-        lo, hi = stack.pop()
-        if lo < hi:
-            p = partition(lo, hi)
-            # push larger side first so the smaller side is processed next,
-            # keeping the stack depth ≤ log₂(n) in the average case
-            if p - lo < hi - p:
-                stack.append((p + 1, hi))
-                stack.append((lo, p - 1))
-            else:
-                stack.append((lo, p - 1))
-                stack.append((p + 1, hi))
-
-
 def reorder_step_by_step(
     data: np.ndarray,
     order: np.ndarray,
@@ -521,17 +309,12 @@ def reorder_step_by_step(
     x0 = data[:, 0, :].reshape(num_trajectories, d)
     end = num_steps - 1
     temp_data = np.copy(data)
-    # if nll > 50:
-    #     A_temp = np.random.randn(d, d)
-    #     H_temp = np.random.randn(d, d)
-    # else:
-        # A_temp = A + np.random.randn(d, d)*0.5
-        # H_temp = H + np.random.randn(d, d)*0.5
     A_temp, H_temp = A, H
     if use_quick_sort:
-        s = time.time()
-        quick_sort(temp_data[:, 1:, :], A_temp, H_temp, time_step_size, x0)
-        print("Time taken for quick sort:", time.time() - s)
+        pass
+        # s = time.time()
+        # quick_sort(temp_data[:, 1:, :], A_temp, H_temp, time_step_size, x0)
+        # print("Time taken for quick sort:", time.time() - s)
     else:
         s = time.time()
         while end > start:
@@ -566,7 +349,7 @@ def reorder_step_by_step(
                     end = i
         print("Time taken for bubble sort:", time.time() - s)
 
-    return temp_data, order
+    return temp_data, order, missing_indices
 
 
 def left_Var_Equation(A1, B1):
@@ -657,13 +440,17 @@ def check_convergence(score_list: list, score_type: str='NLL') -> bool:
     if score_type == 'NLL':
         if len(score_list) < 5:
             return False
-        if score_list[-1] < 10:
-            good_iterations = sum(1 for i in score_list if i < 10)
+        if len(score_list) >= 5 and score_list[-1] == score_list[-3] and score_list[-2] == score_list[-4] \
+            and score_list[-1] < score_list[-2]:
+            # for cases with fluctuating NLL scores (good - bad - good - bad - good)
+            return True
+        elif score_list[-1] < 0:
+            good_iterations = sum(1 for i in score_list if i < 0)
             if good_iterations >= 5:
                 return True
-            diff = [score_list[id].item() - score_list[id+1].item() for id in range(len(score_list)-1)]
-            if np.sum(diff[-5:]) < 1:
-                return True
+        diff = [score_list[id].item() - score_list[id+1].item() for id in range(len(score_list)-1)]
+        if np.sum(diff[-5:]) < 1:
+            return True
     else:
         pass
 
@@ -755,9 +542,7 @@ def estimate_sde_parameters(
             the reordered data, the best ordered data, and lists of scores
             (NLL, NLP, MAE_A, MAE_H, right_percent).
     """
-    # # 1) Sort all segments in each trajectory by variance
-    # reordered_data = sort_data_by_var(data, decreasing_var=False,
-    #                                   known_initial_value=known_initial_value) # assuming diverging SDEs
+    num_trajectories, num_steps, d = data.shape
 
     if data_missing_percent > 0:
         # If data is missing, we need to impute it first
@@ -766,6 +551,8 @@ def estimate_sde_parameters(
         start = time.time()
         data = knn_impute_with_temporal_context(data)
         print("Time taken for KNN imputation:", time.time() - start)
+    else:
+        missing_indices = None
         
     reordered_data = np.copy(data)
 
@@ -775,8 +562,6 @@ def estimate_sde_parameters(
     all_mae_a = []
     all_mae_h = []
     all_right_percent = []
-    best_nll = np.inf
-    best_nlp = np.inf
     best_ordered_data = np.copy(reordered_data)
     for iteration in range(max_iter):
         if iteration > 0:
@@ -788,8 +573,6 @@ def estimate_sde_parameters(
                 start = time.time()
                 reordered_data = knn_impute_with_temporal_context(reordered_data)     
                 print("Time taken for KNN imputation:", time.time() - start)
-            else:
-                missing_indices = None
 
         # Update SDE parameters A, G using MLE with the newly completed data
         A, H = update_sde_parameters(reordered_data, dt=time_step_size, T=T)
@@ -802,42 +585,22 @@ def estimate_sde_parameters(
             # average_nlp += compute_nlp(nll=nll, A=A, H=H)
 
         average_nll = average_nll/num_trajectories
-        # average_nlp = average_nlp/num_trajectories
         MAE_A = np.mean(np.abs(A - true_A))
         MAE_H = np.mean(np.abs(H - true_H))
         print(f"Iteration {iteration+1}:\nNLL = {average_nll:.3f}\nMAE to true A = {MAE_A:.3f}\nMAE to true H = {MAE_H:.3f}")
         
         all_nlls.append(average_nll)
-        # all_nlps.append(average_nlp)
         all_mae_a.append(MAE_A)
         all_mae_h.append(MAE_H)
-        # if average_nll < best_nll:
-        #     best_nll = average_nll
-        #     best_ordered_data = np.copy(reordered_data)
-        # if average_nlp < best_nlp:
-        #     best_nlp = average_nlp
-        #     best_ordered_data = np.copy(reordered_data)
-        
-        # # Transform the data
-        # reordered_data = np.reshape(reordered_data,
-        #                             (num_trajectories, num_segments,
-        #                             steps_per_segment, d))
-        # # Reconstruct / reorder segments to maximize LL - DAG penalty
-        # reordered_data = reorder_trajectories(reordered_data, A, H, time_step_size, alpha,
-        #                                       known_initial_value=known_initial_value)
 
         if check_convergence(score_list=all_nlls):
             # converged, should stop algorithm
             break
 
-        reordered_data, reordered_order = reorder_step_by_step(reordered_data, reordered_order, A, H, time_step_size, float(average_nll.item()),
+        reordered_data, reordered_order, missing_indices = reorder_step_by_step(reordered_data, reordered_order, A, H, time_step_size, float(average_nll.item()),
                                               known_initial_value=known_initial_value,
                                               noisy_measurements_sigma=noisy_measurements_sigma,
                                               missing_indices=missing_indices)
-        
-        # # Transform the data back to its previous shape
-        # reordered_data = np.reshape(reordered_data, (num_trajectories,
-        #                                             num_segments*steps_per_segment, d))
 
         right_percent = check_sorting_accuracy(original_data, reordered_data, reordered_order=reordered_order)
         print(f"Right sorting percent: {right_percent:.3f}")
@@ -863,16 +626,18 @@ def check_rank(data, A, H):
     return (rank == d, rank)
 
 
-def noisy_measurement(data: np.ndarray, sigma: float = 0.1):
+def noisy_measurement(data: np.ndarray, sigma: float = 0.1, random_seed: int = 167) -> np.ndarray:
     """Adding noise ~ N(0, I*sigma^2) to the data to mimic noisy measurements.
 
     Args:
         data (np.ndarray): Data to be added noise.
         sigma (float): Standard deviation of the Gaussian noise.
+        random_seed (int, optional): Random seed for reproducibility. Defaults to 167.
 
     Returns:
         np.ndarray: Noisy data.
     """
+    np.random.seed(random_seed)
     noise = np.random.normal(0, sigma, data.shape)
     return data + noise
 
@@ -881,7 +646,7 @@ def randomize_data(
     data: np.ndarray,
     known_initial_value: bool = False,
     random_percent: float = 0.5,
-    random_seed: int = 42
+    random_seed: int = 167
     ) -> np.ndarray:
     """Randomize the data by shuffling time steps for all trajectories.
     Args:
@@ -889,24 +654,20 @@ def randomize_data(
         known_initial_value (bool, optional): If True, the initial values of trajectories
             are known beforehand, and should stay fixed. Defaults to False.
         random_percent (float, optional): Percentage of data to be randomized. Defaults to 0.5.
-        random_seed (int, optional): Random seed for reproducibility. Defaults to 42.
+        random_seed (int, optional): Random seed for reproducibility. Defaults to 167.
     Returns:
         np.ndarray: Randomized data.
         np.ndarray: Permutation indices used for randomization.
     """
     np.random.seed(random_seed)
     num_trajectories, num_steps, d = data.shape
-    if known_initial_value:
-        start = 1
-    else:
-        start = 0
-    permutation_id = np.arange(start, num_steps)
+    permutation_id = np.arange(num_steps)
 
     num_fixed_steps = int(num_steps * (1 - random_percent))
     fixed_indices = np.random.choice(permutation_id, size=num_fixed_steps, replace=False)
     random_indices = [i for i in permutation_id if i not in fixed_indices]
     random_indices = np.random.permutation(random_indices)
-    for i in range(start, len(permutation_id)):
+    for i in range(len(permutation_id)):
         if i in fixed_indices:
             continue
         else:
@@ -914,6 +675,8 @@ def randomize_data(
             random_indices = random_indices[1:]
 
     if known_initial_value:
+        id = np.argwhere(permutation_id == 0)
+        permutation_id = np.delete(permutation_id, id)
         permutation_id = np.concatenate(([0], permutation_id))
 
     randomized_data = data[:, permutation_id, :]
@@ -928,7 +691,8 @@ def run_experiment(
     known_initial_value: bool = False,
     noisy_measurements_sigma: float = 0,
     data_missing_percent: float = 0.0,
-    random_percent: float = 0.5
+    random_percent: float = 1,
+    random_seed: int = 167
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list, list, list, list, list]:
     """Running experiments and plotting the results
 
@@ -950,12 +714,14 @@ def run_experiment(
         data_missing_percent (float, optional): If larger than 0, some data will be missing.
             Defaults to 0.0.
         random_percent (float, optional): Percentage of data to be randomized. Defaults to 0.5.
+        random_seed (int, optional): Random seed for reproducibility. Defaults to 167.
     Returns:
         tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list, list, list, list, list]:
             Estimated drift-diffusion matrices (A, G), reordered data,
             best ordered data, all NLLs, all NLPs, all MAE_A, all MAE_H,
             and all right_sorting_percent results through trajectories.
     """
+    np.random.seed(random_seed)
     if version == 1:
         A = np.zeros((d, d))
         G = np.ones((d, d)) * 5
@@ -971,6 +737,7 @@ def run_experiment(
     elif version == 5:
         A = np.random.randn(d, d)
         G = np.random.randn(d, d)
+        b = np.random.randn(d)
     elif version == 6:
         one_rand_A = np.random.randn(d)
         one_rand_G = np.random.randn(d)
@@ -982,21 +749,21 @@ def run_experiment(
     X0_dist = [(point, 1 / len(points)) for point in points]
     X_appex = linear_additive_noise_data(
         num_trajectories=num_trajectories, d=d, T=T, dt_EM=dt, dt=dt,
-        A=A, G=G, sample_X0_once=True, X0_dist=X0_dist)
-    print(X_appex.shape, "Generated data shape")
+        A=A, G=G, b=b, sample_X0_once=True, X0_dist=X0_dist)
+    print("Generated data shape:", X_appex.shape)
 
     if noisy_measurements_sigma > 0:
         # Adding noise to the data
-        X_appex = noisy_measurement(X_appex, sigma=noisy_measurements_sigma)
-        print(X_appex.shape, "Noisy data shape")
+        X_appex = noisy_measurement(X_appex, sigma=noisy_measurements_sigma, random_seed=random_seed)
 
     # Randomize segments between each trajectory (to get rid of the temporal order between segments)
     random_X, permutation_id = randomize_data(X_appex, known_initial_value=known_initial_value,
-                              random_percent=random_percent, random_seed=42)
+                              random_percent=random_percent, random_seed=random_seed)
 
     right_percent = check_sorting_accuracy(X_appex, random_X, check_by_indices_order=True,
                                             reordered_order=permutation_id)
-    print(right_percent)
+    print(f"Right-sorting percent before reordering: {right_percent:.3f}")
+    print(f"Noise sigma: {noisy_measurements_sigma}")
 
     # Estimating SDE's parameters A, G
     estimated_A, estimated_H, reordered_X, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_h, all_right_percent = \
@@ -1007,25 +774,6 @@ def run_experiment(
     all_nlls = [float(item) for item in all_nlls]
     all_right_percent.insert(0, right_percent)
     all_right_percent = [float(item) for item in all_right_percent]
-    
-    # # We'll use Cholesky if H_est is positive definite
-    # # else fallback to sqrtm or pseudo-chol
-    # try:
-    #     estimated_G = np.linalg.cholesky(estimated_H)
-    # except np.linalg.LinAlgError:
-    #     # if not SPD, do a symmetric sqrt
-    #     from scipy.linalg import sqrtm
-    #     estimated_G = sqrtm(estimated_H)
-    #     # If it still fails, consider a small regularization
-
-    # print(estimated_A, "A")
-    # print(estimated_G, "G")
-
-    try:
-        is_id, rank_val = check_rank(reordered_X, estimated_A, estimated_H)
-        print(f"Rank = {rank_val}, Identifiable? {is_id}")
-    except Exception as e:
-        print(f"Error in rank check: {e}")
 
     # Plot results
     num_points = X_appex.shape[1]
@@ -1108,25 +856,31 @@ def run_experiment(
 
 
 if __name__ == "__main__":
-    # data generated by data_generation.py of APPEX code
-    T = 0.10
-    d = 5
-    dt = 0.01
-    num_trajectories = 5000
-    version = 5
-    max_iter = 20
-    known_initial_value = True
-    noisy_measurements_sigma = 0
-    data_missing_percent = 0.5
-    random_percent = 1
+    parser = argparse.ArgumentParser(description='Run experiments with custom parameters.')
+
+    parser.add_argument('--T', type=float, default=1, help='Total time period T (seconds)')
+    parser.add_argument('--d', type=int, default=10, help='Dimension d')
+    parser.add_argument('--dt', type=float, default=0.01, help='Time step size dt (seconds)')
+    parser.add_argument('--num_trajectories', type=int, default=2000, help='Number of Euler-Maruyama-simulated trajectories')
+    parser.add_argument('--version', type=int, default=5, help='Experiment version')
+    parser.add_argument('--max_iter', type=int, default=10, help='Maximum number of iterations')
+    parser.add_argument('--known_initial_value', type=bool, default=False, help='Flag if initial step is known and fixed (not randomized)')
+    parser.add_argument('--noisy_measurements_sigma', type=float, default=0.2, help='Noise Sigma in noisy measurements scenario')
+    parser.add_argument('--data_missing_percent', type=float, default=0, help='Percentage of data missing')
+    parser.add_argument('--random_percent', type=float, default=1, help='Randomized percentage of data (0-1), 1 being fully randomized')
+    parser.add_argument('--random_seed', type=int, default=167, help='Random seed')
+
+    args = parser.parse_args()
+
+    np.random.seed(args.random_seed)
 
     # Run different experiments
-    run_experiment(T=T, d=d, dt=dt, num_trajectories=num_trajectories,
-                   version=version, max_iter=max_iter,
-                   known_initial_value=known_initial_value,
-                   noisy_measurements_sigma=noisy_measurements_sigma,
-                   data_missing_percent=data_missing_percent,
-                   random_percent=random_percent)
+    run_experiment(T=args.T, d=args.d, dt=args.dt, num_trajectories=args.num_trajectories,
+                   version=args.version, max_iter=args.max_iter,
+                   known_initial_value=args.known_initial_value,
+                   noisy_measurements_sigma=args.noisy_measurements_sigma,
+                   data_missing_percent=args.data_missing_percent,
+                   random_percent=args.random_percent, random_seed=args.random_seed)
 
     """
     Ver 2: Data without Temporal Order
