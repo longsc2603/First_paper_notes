@@ -865,7 +865,7 @@ if __name__ == "__main__":
     parser.add_argument('--version', type=int, default=5, help='Experiment version')
     parser.add_argument('--max_iter', type=int, default=10, help='Maximum number of iterations')
     parser.add_argument('--known_initial_value', type=bool, default=False, help='Flag if initial step is known and fixed (not randomized)')
-    parser.add_argument('--noisy_measurements_sigma', type=float, default=0.2, help='Noise Sigma in noisy measurements scenario')
+    parser.add_argument('--noisy_measurements_sigma', type=float, default=0, help='Noise Sigma in noisy measurements scenario')
     parser.add_argument('--data_missing_percent', type=float, default=0, help='Percentage of data missing')
     parser.add_argument('--random_percent', type=float, default=1, help='Randomized percentage of data (0-1), 1 being fully randomized')
     parser.add_argument('--random_seed', type=int, default=167, help='Random seed')
