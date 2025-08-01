@@ -1,14 +1,17 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import argparse
+import scanpy as sc
 import scipy
 import scipy.linalg
+import argparse
 import time
 import random
+import csv
 from sklearn.impute import KNNImputer
 from numpy.lib.stride_tricks import sliding_window_view
 
 from experiments import generate_independent_points, linear_additive_noise_data
+from param_est import estimate_ou_em, estimate_ou_ols
 
 
 def data_masking(
@@ -264,6 +267,88 @@ def cal_score(A, H, x_t, t, x0, noisy_measurements_sigma=0):
     return score
 
 
+def dpt(X):
+    missing_indices = None
+    X_ordered = np.copy(X)  # Initialize ordered array
+
+    num_trajectories, num_steps, d = X.shape
+
+    # ==== 2. Use Scanpy's AnnData ====
+    adata = sc.AnnData(X[0])   # shape (n_points, n_features)
+
+    # ==== 3. Compute the neighborhood graph ====
+    sc.pp.neighbors(adata, n_neighbors=3, use_rep='X')
+
+    # ==== 4. Run Diffusion Pseudotime (DPT) ====
+    # Select a root cell (default: index 0). You may wish to use the point with minimum norm.
+    root_cell = np.argmin(np.linalg.norm(X[0], axis=1))
+    adata.uns['iroot'] = root_cell
+    if num_steps <= 10:
+        n_dcs = num_steps - 1
+        sc.tl.dpt(adata, n_dcs=n_dcs)
+    else:
+        sc.tl.dpt(adata, n_dcs=10)
+
+    # ==== 5. Extract the pseudotime and get order ====
+    pseudo_time = adata.obs['dpt_pseudotime'].values  # shape (n_points,)
+    order = np.argsort(pseudo_time)
+
+    X_ordered = X[:, order, :]
+    
+
+    return X_ordered, order, missing_indices
+
+
+def mst_ordering(X, start_at=None):
+    """
+    Args:
+        X: (n_points, d) numpy array of shuffled trajectory points
+        start_at: optional int, node to start DFS from (default: node with min norm)
+    Returns:
+        order: list of indices giving a suggested temporal order
+    """
+    from scipy.spatial.distance import pdist, squareform
+    from scipy.sparse.csgraph import minimum_spanning_tree
+    
+    X = np.array(X)
+    X_ordered = np.zeros_like(X)  # Initialize ordered array
+    num_trajectories, n, d = X.shape
+    for i in range(num_trajectories):
+        X[i] = np.reshape(X[i], (n, d))  # Ensure each trajectory is 2D
+        # 1. Compute pairwise distance matrix
+        D = squareform(pdist(X[i]))
+        # 2. Compute MST (returns sparse csr_matrix)
+        mst = minimum_spanning_tree(D)
+        mst = mst + mst.T  # make it symmetric (undirected)
+        mst = mst.toarray()
+        
+        # 3. Pick starting node
+        if start_at is None:
+            start_at = np.argmin(np.linalg.norm(X[i], axis=1))
+        
+        # 4. Traverse using DFS to get an order
+        visited = np.zeros(n, dtype=bool)
+        order = []
+        stack = [start_at]
+        while stack:
+            node = stack.pop()
+            if not visited[node]:
+                visited[node] = True
+                order.append(node)
+                # Push neighbors (in any order)
+                neighbors = np.where(mst[node] > 0)[0]
+                # Sort by distance for smoother order (optional)
+                neighbors = sorted(neighbors, key=lambda i: D[node, i])
+                # Reverse to simulate DFS stack
+                stack.extend(neighbors[::-1])
+
+        X_ordered[i] = X[i, order, :]
+
+    missing_indices = None
+
+    return X_ordered, order, missing_indices
+
+
 def reorder_step_by_step(
     data: np.ndarray,
     order: np.ndarray,
@@ -441,16 +526,16 @@ def check_convergence(score_list: list, score_type: str='NLL') -> bool:
         if len(score_list) < 5:
             return False
         if len(score_list) >= 5 and score_list[-1] == score_list[-3] and score_list[-2] == score_list[-4] \
-            and score_list[-1] < score_list[-2]:
+            and score_list[-1] <= score_list[-2]:
             # for cases with fluctuating NLL scores (good - bad - good - bad - good)
             return True
         elif score_list[-1] < 0:
             good_iterations = sum(1 for i in score_list if i < 0)
             if good_iterations >= 5:
                 return True
-        diff = [score_list[id].item() - score_list[id+1].item() for id in range(len(score_list)-1)]
-        if np.sum(diff[-5:]) < 1:
-            return True
+            diff = [score_list[id].item() - score_list[id+1].item() for id in range(len(score_list)-1)]
+            if np.sum(diff[-5:]) < 1:
+                return True
     else:
         pass
 
@@ -511,14 +596,18 @@ def estimate_sde_parameters(
     true_A: np.ndarray,
     true_H: np.ndarray,
     max_iter: int = 10,
-    alpha: float = 0.1,
     known_initial_value: bool = False,
     noisy_measurements_sigma: float = 0,
-    data_missing_percent: float = 0.0
+    data_missing_percent: float = 0.0,
+    random_seed: int = 167,
+    param_est_method: str = 'mle',
+    sorting_method: str = 'our',
+    setting: str = 'base',
+    result_log_file: str = 'results/our_mle.csv'
     ) -> tuple[np.ndarray, np.ndarray]:
     """Main iterative scheme:
-    1) Reconstruct / reorder segments using the current (A, G).
-    2) Re-estimate A, G from the newly-reconstructed data.
+    1) Reconstruct / reorder segments using the current (A, H).
+    2) Re-estimate A, H from the newly-reconstructed data.
 
     Args:
         data (np.ndarray): Input data, shape (num_trajectories, num_steps, d)
@@ -529,25 +618,31 @@ def estimate_sde_parameters(
         true_A (nd.ndarray): True drift matrix A. Used for computing MAE.
         true_H (nd.ndarray): True (observational) diffusion matrix H (= G@G.T). Used for computing MAE.
         max_iter (int, optional): Maximum number of iterations. Defaults to 10.
-        alpha (float, optional): Regularization hyper-parameter. Defaults to 0.1.
         known_initial_value (bool, optional): If True, the initial values of trajectories
             are known beforehand, and should stay fixed. Defaults to False.
         noisy_measurements_sigma (float, optional): Standard deviation of the Gaussian noise.
             Defaults to 0.
         data_missing_percent (float, optional): Percentage of missing data in the input.
             Defaults to 0.0.
+        random_seed (int, optional): Random seed for reproducibility. Defaults to 167.
+        param_est_method (str, optional): Method for estimating SDE parameters.
+            Options: 'mle', 'ols', 'em'. Defaults to 'mle'.
+        sorting_method (str, optional): Method for sorting the data.
+            Options: 'our', 'mst', 'dpt'. Defaults to 'our'.
+        setting (str, optional): Setting of the experiment, used for logging results.
+            Options: 'base', 'noisy'. Defaults to 'base'.
+        result_log_file (str, optional): File to log the results. Defaults to 'results/our_mle.csv'.
 
     Returns:
         tuple[np.ndarray, np.ndarray]: The estimated drift-diffusion matrices (A, H = G@G.T),
             the reordered data, the best ordered data, and lists of scores
             (NLL, NLP, MAE_A, MAE_H, right_percent).
     """
-    num_trajectories, num_steps, d = data.shape
-
     if data_missing_percent > 0:
         # If data is missing, we need to impute it first
         data, missing_indices = data_masking(data, p=data_missing_percent,
-                                             known_initial_value=known_initial_value)
+                                             known_initial_value=known_initial_value,
+                                             random_seed=random_seed)
         start = time.time()
         data = knn_impute_with_temporal_context(data)
         print("Time taken for KNN imputation:", time.time() - start)
@@ -555,6 +650,7 @@ def estimate_sde_parameters(
         missing_indices = None
         
     reordered_data = np.copy(data)
+    num_trajectories, num_steps, d = reordered_data.shape
 
     # 2) Iterative scheme for estimating SDE parameters
     all_nlls = []
@@ -564,6 +660,7 @@ def estimate_sde_parameters(
     all_right_percent = []
     best_ordered_data = np.copy(reordered_data)
     for iteration in range(max_iter):
+        iter_start_time = time.time()
         if iteration > 0:
             # If not first iteration, re-impute the data
             if data_missing_percent > 0:
@@ -573,38 +670,78 @@ def estimate_sde_parameters(
                 start = time.time()
                 reordered_data = knn_impute_with_temporal_context(reordered_data)     
                 print("Time taken for KNN imputation:", time.time() - start)
+        print(f"Iteration {iteration+1}:")
 
         # Update SDE parameters A, G using MLE with the newly completed data
-        A, H = update_sde_parameters(reordered_data, dt=time_step_size, T=T)
+        start_time = time.time()
+        if param_est_method == 'mle':
+            # MLE
+            A, H = update_sde_parameters(reordered_data, dt=time_step_size, T=T)
+            print(f"Time taken for MLE: {time.time() - start_time:.3f} seconds")
+
+        elif param_est_method == 'ols':
+            # OU_OLS
+            A, b, H = estimate_ou_ols(reordered_data, delta_t=time_step_size)
+
+            print(f"Time taken for OU OLS: {time.time() - start_time:.3f} seconds")
+
+        elif param_est_method == 'em':
+            # OU_EM
+            A, b, H = estimate_ou_em(reordered_data, dt=time_step_size)
+
+            print(f"Time taken for OU EM: {time.time() - start_time:.3f} seconds")
+    
 
         average_nll = 0.0
-        # average_nlp = 0.0
         for traj in range(num_trajectories):
             nll = compute_nll(reordered_data[traj], A, H, dt=time_step_size)
             average_nll += nll
-            # average_nlp += compute_nlp(nll=nll, A=A, H=H)
-
+        
         average_nll = average_nll/num_trajectories
+        all_nlls.append(average_nll)
+
         MAE_A = np.mean(np.abs(A - true_A))
         MAE_H = np.mean(np.abs(H - true_H))
-        print(f"Iteration {iteration+1}:\nNLL = {average_nll:.3f}\nMAE to true A = {MAE_A:.3f}\nMAE to true H = {MAE_H:.3f}")
+        print(f"MAE to true A = {MAE_A:.3f}\nMAE to true H = {MAE_H:.3f}")
+        print(f"NLL = {average_nll:.3f}")
         
-        all_nlls.append(average_nll)
         all_mae_a.append(MAE_A)
         all_mae_h.append(MAE_H)
-
+        
         if check_convergence(score_list=all_nlls):
             # converged, should stop algorithm
+            result_log = [random_seed, noisy_measurements_sigma, round(MAE_A, 3), round(MAE_H, 3), round(right_percent, 3), round(runtime, 3)]
             break
+            
+        if sorting_method == 'our':
+            reordered_data, reordered_order, missing_indices = reorder_step_by_step(reordered_data, reordered_order, A, H, time_step_size, float(average_nll.item()),
+                                                  known_initial_value=known_initial_value,
+                                                  noisy_measurements_sigma=noisy_measurements_sigma,
+                                                  missing_indices=missing_indices)
+        elif sorting_method == 'mst':
+            reordered_data, reordered_order, missing_indices = mst_ordering(X=reordered_data, start_at=0)
+        
+        elif sorting_method == 'dpt':
+            reordered_data, reordered_order, missing_indices = dpt(X=reordered_data)
 
-        reordered_data, reordered_order, missing_indices = reorder_step_by_step(reordered_data, reordered_order, A, H, time_step_size, float(average_nll.item()),
-                                              known_initial_value=known_initial_value,
-                                              noisy_measurements_sigma=noisy_measurements_sigma,
-                                              missing_indices=missing_indices)
-
-        right_percent = check_sorting_accuracy(original_data, reordered_data, reordered_order=reordered_order)
+        right_percent = check_sorting_accuracy(original_data, reordered_data, reordered_order=reordered_order, check_by_indices_order=False)
         print(f"Right sorting percent: {right_percent:.3f}")
         all_right_percent.append(right_percent)
+
+        runtime = time.time() - iter_start_time
+
+        # Logging results
+        # Data to append (as a list or tuple)
+        if setting == 'base':
+            result_log = [random_seed, num_steps, round(MAE_A, 3), round(MAE_H, 3), round(right_percent, 3), round(runtime, 3)]
+
+        elif setting == 'noisy':
+            result_log = [random_seed, noisy_measurements_sigma, round(MAE_A, 3), round(MAE_H, 3), round(right_percent, 3), round(runtime, 3)]
+
+    # Append to the file
+    with open(result_log_file, 'a', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(result_log)
 
     return A, H, reordered_data, best_ordered_data, all_nlls, all_nlps, all_mae_a, all_mae_h, all_right_percent
 
@@ -692,7 +829,11 @@ def run_experiment(
     noisy_measurements_sigma: float = 0,
     data_missing_percent: float = 0.0,
     random_percent: float = 1,
-    random_seed: int = 167
+    random_seed: int = 167,
+    param_est_method: str = 'mle',
+    sorting_method: str = 'our',
+    setting: str = 'base',
+    result_log_file: str = 'results/our_mle.csv'
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list, list, list, list, list]:
     """Running experiments and plotting the results
 
@@ -715,6 +856,13 @@ def run_experiment(
             Defaults to 0.0.
         random_percent (float, optional): Percentage of data to be randomized. Defaults to 0.5.
         random_seed (int, optional): Random seed for reproducibility. Defaults to 167.
+        param_est_method (str, optional): Method for estimating SDE parameters.
+            Options: 'mle', 'ols', 'em'. Defaults to 'mle'.
+        sorting_method (str, optional): Method for sorting the data.
+            Options: 'our', 'mst', 'dpt'. Defaults to 'our'.
+        setting (str, optional): Setting of the experiment, used for logging results.
+            Options: 'base', 'noisy'. Defaults to 'base'.
+        result_log_file (str, optional): File to log the results. Defaults to 'results/our_mle.csv'.
     Returns:
         tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list, list, list, list, list]:
             Estimated drift-diffusion matrices (A, G), reordered data,
@@ -723,8 +871,9 @@ def run_experiment(
     """
     np.random.seed(random_seed)
     if version == 1:
-        A = np.zeros((d, d))
+        A = np.ones((d, d))
         G = np.ones((d, d)) * 5
+        b = np.zeros((d,))  # No affine drift term
     elif version == 2:
         # our_data = data_masking(our_data)
         pass
@@ -762,7 +911,7 @@ def run_experiment(
 
     right_percent = check_sorting_accuracy(X_appex, random_X, check_by_indices_order=True,
                                             reordered_order=permutation_id)
-    print(f"Right-sorting percent before reordering: {right_percent:.3f}")
+    print(f"Right sorting percent before reordering: {right_percent:.3f}")
     print(f"Noise sigma: {noisy_measurements_sigma}")
 
     # Estimating SDE's parameters A, G
@@ -770,7 +919,9 @@ def run_experiment(
         estimate_sde_parameters(random_X, X_appex, reordered_order=permutation_id, time_step_size=dt, T=T, max_iter=max_iter, true_A=A,
                                 true_H=G@G.T, known_initial_value=known_initial_value,
                                 noisy_measurements_sigma=noisy_measurements_sigma,
-                                data_missing_percent=data_missing_percent)
+                                data_missing_percent=data_missing_percent, random_seed=random_seed,
+                                param_est_method=param_est_method, sorting_method=sorting_method,
+                                setting=setting, result_log_file=result_log_file)
     all_nlls = [float(item) for item in all_nlls]
     all_right_percent.insert(0, right_percent)
     all_right_percent = [float(item) for item in all_right_percent]
@@ -816,8 +967,8 @@ def run_experiment(
     ax1.set_title("Original data")
     # ax1.legend()
 
-    ax2_top.plot(num_iterations, all_mae_a, label=f"MAE to True A")
-    ax2_bottom.plot(num_iterations, all_mae_h, label=f"MAE to True H")
+    ax2_top.plot(np.arange(1, len(all_mae_a) + 1), all_mae_a, label=f"MAE to True A")
+    ax2_bottom.plot(np.arange(1, len(all_mae_a) + 1), all_mae_h, label=f"MAE to True H")
     ax2_top.set_xlabel('Epoch')
     ax2_top.set_ylabel('Mean Absolute Error')
     ax2_bottom.set_xlabel('Epoch')
@@ -830,11 +981,6 @@ def run_experiment(
     ax3.set_ylabel('Variable 0')
     ax3.set_title("Reconstructed data")
     ax3.legend()
-
-    # ax4.plot(num_iterations, all_nlps)
-    # ax4.set_xlabel('Epoch')
-    # ax4.set_ylabel('Negative Log-Posterior')
-    # ax4.set_title("Negative Log-Posterior through epochs")
 
     ax4.plot(num_iterations, all_nlls)
     ax4.set_xlabel('Epoch')
@@ -869,6 +1015,14 @@ if __name__ == "__main__":
     parser.add_argument('--data_missing_percent', type=float, default=0, help='Percentage of data missing')
     parser.add_argument('--random_percent', type=float, default=1, help='Randomized percentage of data (0-1), 1 being fully randomized')
     parser.add_argument('--random_seed', type=int, default=167, help='Random seed')
+    parser.add_argument('--param_est_method', type=str, default='mle',
+                        help='Method for estimating SDE parameters: "mle", "ols", "em"')
+    parser.add_argument('--sorting_method', type=str, default='our',
+                        help='Method for sorting the data: "our", "mst", "dpt"')
+    parser.add_argument('--setting', type=str, default='base',
+                        help='Setting of the experiment: "base", "noisy"')
+    parser.add_argument('--result_log_file', type=str, default='results/our_mle.csv',
+                        help='File to log the results')
 
     args = parser.parse_args()
 
@@ -880,7 +1034,10 @@ if __name__ == "__main__":
                    known_initial_value=args.known_initial_value,
                    noisy_measurements_sigma=args.noisy_measurements_sigma,
                    data_missing_percent=args.data_missing_percent,
-                   random_percent=args.random_percent, random_seed=args.random_seed)
+                   random_percent=args.random_percent, random_seed=args.random_seed,
+                   param_est_method=args.param_est_method,
+                   sorting_method=args.sorting_method, setting=args.setting,
+                   result_log_file=args.result_log_file)
 
     """
     Ver 2: Data without Temporal Order

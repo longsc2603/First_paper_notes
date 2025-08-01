@@ -292,11 +292,12 @@ if __name__ == "__main__":
     num_trajectories = 1000
     A = np.random.randn(d, d)  # Random drift matrix
     G = np.random.randn(d, d)  # Random diffusion matrix
+    b = np.random.randn(d)  # Random drift vector
     points = generate_independent_points(d, d)
     X0_dist = [(point, 1 / len(points)) for point in points]
     X_appex = linear_additive_noise_data(
         num_trajectories=num_trajectories, d=d, T=T, dt_EM=dt, dt=dt,
-        A=A, G=G, X0_dist=X0_dist)
+        A=A, G=G, b=b, X0_dist=X0_dist)
     print(X_appex.shape)
 
     # Randomize segments between each trajectory (to get rid of the temporal order between segments)
