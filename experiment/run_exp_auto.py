@@ -14,7 +14,11 @@ if setting == 'base':
         for seed in range(3):
             # Arguments to pass (as a list of strings)
             random_seed = [167, 16, 17]
-            args = f"--T {T[t]}" +  " --random_seed " + str(random_seed[seed])
+            args = f"--T {T[t]}" +  " --random_seed " + str(random_seed[seed]) \
+                + f" --param_est_method {param_est_method}" \
+                + f" --sorting_method {sorting_method}" \
+                + f" --setting {setting}" \
+                + f" --result_log_file {result_log_file}"
 
             # Build the command: ['python', script_path, arg1, arg2, ...]
             command = f"python {script_path} {args}"

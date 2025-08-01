@@ -411,7 +411,7 @@ def reorder_step_by_step(
                                     x0=x0, noisy_measurements_sigma=noisy_measurements_sigma)
                 score_j = cal_score(A=A_temp, H=H_temp, x_t=x_j, t=time_step_size*(j+1),
                                     x0=x0, noisy_measurements_sigma=noisy_measurements_sigma)
-                drift = np.mean((x_j - x_i)/time_step_size, axis=0)
+                drift = np.abs(np.mean((x_j - x_i)/time_step_size, axis=0))
                 err_i = cal_error(drift=drift, H=H_temp, score=score_i, n=num_trajectories, d=d)
                 err_j = cal_error(drift=drift, H=H_temp, score=score_j, n=num_trajectories, d=d)
 
@@ -710,7 +710,12 @@ def estimate_sde_parameters(
         
         if check_convergence(score_list=all_nlls):
             # converged, should stop algorithm
-            result_log = [random_seed, noisy_measurements_sigma, round(MAE_A, 3), round(MAE_H, 3), round(right_percent, 3), round(runtime, 3)]
+            if setting == 'base':
+                result_log = [random_seed, num_steps, round(MAE_A, 3), round(MAE_H, 3), round(right_percent, 3), round(runtime, 3)]
+
+            elif setting == 'noisy':
+                result_log = [random_seed, noisy_measurements_sigma, round(MAE_A, 3), round(MAE_H, 3), round(right_percent, 3), round(runtime, 3)]
+            
             break
             
         if sorting_method == 'our':
