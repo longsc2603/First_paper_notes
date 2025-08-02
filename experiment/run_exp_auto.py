@@ -6,6 +6,8 @@ param_est_method = "mle"
 sorting_method = "our"
 setting = 'base'
 result_log_file = "results/our_mle.csv"
+teb_log_file = "results/teb.csv"
+rmse_log_file = "results/rmse.csv"
 
 if setting == 'base':
     # Base version
@@ -17,8 +19,8 @@ if setting == 'base':
             args = f"--T {T[t]}" +  " --random_seed " + str(random_seed[seed]) \
                 + f" --param_est_method {param_est_method}" \
                 + f" --sorting_method {sorting_method}" \
-                + f" --setting {setting}" \
-                + f" --result_log_file {result_log_file}"
+                + f" --setting {setting}"
+                # + f" --result_log_file {result_log_file}"
 
             # Build the command: ['python', script_path, arg1, arg2, ...]
             command = f"python {script_path} {args}"

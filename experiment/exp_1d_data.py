@@ -6,10 +6,10 @@ import os
 # ---- Hyperparameters for PKPD (One-compartment) ----
 args_pkpd = {
     "seed": 167,
-    "n_samples": 500,
+    "n_samples": 250,
     "t_final": 15.0,
-    "n_steps": 60,
-    "obs_noise": 0.5,
+    "n_steps": 100,
+    "obs_noise": 0.1,
     "C0": 0.05,      # Decay rate for untreated
     "C1": 0.15,      # Decay rate for treated
     "V": 1.0,        # Volume parameter
